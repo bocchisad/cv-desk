@@ -138,21 +138,22 @@ def run_tray():
     class Tray(rumps.App):
         def __init__(self):
             super().__init__("CV", quit_button=None)
+            self.armed_item = rumps.MenuItem("Armed", callback=self.toggle_arm)
+            self.preview_item = rumps.MenuItem("Show Preview", callback=self.toggle_preview)
+            self.status_item = rumps.MenuItem("Status: …")
+            self.quit_item = rumps.MenuItem("Quit", callback=self.quit_app)
             self.menu = [
                 rumps.MenuItem(f"CV Desk v{__version__}"),
                 None,
-                rumps.MenuItem("Armed", callback=self.toggle_arm),
-                rumps.MenuItem("Show Preview", callback=self.toggle_preview),
+                self.armed_item,
+                self.preview_item,
                 None,
-                rumps.MenuItem("Status: …"),
+                self.status_item,
                 None,
-                rumps.MenuItem("Quit", callback=self.quit_app),
+                self.quit_item,
             ]
-            self["_armed"] = self.menu["Armed"]
-            self["_preview"] = self.menu["Show Preview"]
-            self["_status"] = self.menu["Status: …"]
-            self["_armed"].state = app_core.engine.armed
-            self["_preview"].state = app_core._show_preview
+            self.armed_item.state = bool(app_core.engine.armed)
+            self.preview_item.state = bool(app_core._show_preview)
             app_core.cam.start()
             self._worker = threading.Thread(target=app_core.loop_vision, daemon=True)
             self._worker.start()
@@ -160,20 +161,20 @@ def run_tray():
         @rumps.timer(1.0)
         def _tick(self, _):
             try:
-                self["_status"].title = f"Status: {app_core._status[:42]}"
-                self["_armed"].state = app_core.engine.armed
+                self.status_item.title = f"Status: {app_core._status[:42]}"
+                self.armed_item.state = bool(app_core.engine.armed)
             except Exception:
                 pass
 
         def toggle_arm(self, sender):
             app_core.engine.armed = not app_core.engine.armed
-            sender.state = app_core.engine.armed
+            sender.state = bool(app_core.engine.armed)
             app_core.cfg["armed"] = app_core.engine.armed
             save_config(app_core.cfg)
 
         def toggle_preview(self, sender):
             app_core._show_preview = not app_core._show_preview
-            sender.state = app_core._show_preview
+            sender.state = bool(app_core._show_preview)
             app_core.cfg["preview"] = app_core._show_preview
             save_config(app_core.cfg)
             if not app_core._show_preview:
