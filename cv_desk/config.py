@@ -23,6 +23,10 @@ def load_config() -> dict[str, Any]:
     ensure_user_config()
     default = json.loads(DEFAULT_PATH.read_text(encoding="utf-8"))
     user = json.loads(USER_PATH.read_text(encoding="utf-8"))
+    # Old installs defaulted to 0; with Continuity Camera that is often the iPhone.
+    if user.get("camera_index") == 0:
+        user["camera_index"] = "auto"
+        USER_PATH.write_text(json.dumps(user, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     merged = {**default, **user}
     merged["actions"] = {**default.get("actions", {}), **user.get("actions", {})}
     return merged

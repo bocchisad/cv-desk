@@ -11,9 +11,9 @@
 |---------|--------|
 | Fist → open palm | Play/Pause |
 | Open palm swipe L/R | Previous / Next track |
-| Pinch + vertical move | Volume ± |
-| OK sign | Mute toggle |
-| Palm face-up hold 0.6s | Mission Control |
+| Pinch + vertical move | Volume ± (natural thumb+index pinch) |
+| OK sign hold ~0.4s | Mute toggle |
+| Thumbs-up hold ~0.7s | Mission Control |
 | Two-finger horizontal swipe | Desktop Space ←/→ |
 | Fist hold 0.8s | Arm/disarm recognition |
 

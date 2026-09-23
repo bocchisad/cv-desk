@@ -7,3 +7,5 @@ models/*.task
 *.log
 .idea/
 .vscode/
+dist/
+*.app/

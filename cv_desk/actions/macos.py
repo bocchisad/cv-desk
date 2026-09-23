@@ -74,20 +74,17 @@ def play_pause() -> tuple[bool, str]:
     ok, msg = _media_key(_NX_PLAY)
     if ok:
         return True, "play/pause"
-    # AppleScript fallback — Music / Spotify if running
-    ok2, _ = _osascript(
-        'try\n'
-        '  tell application "System Events" to key code 49 using {command down, option down}\n'
-        'end try'
-    )
-    # Better fallbacks:
     for app in ("Spotify", "Music"):
-        ok3, _ = _osascript(
-            f'try\n tell application "{app}" to playpause\nend try'
+        ok2, out = _osascript(
+            f'if application "{app}" is running then\n'
+            f'  tell application "{app}" to playpause\n'
+            f'  return "ok"\n'
+            f'end if\n'
+            f'return "no"'
         )
-        if ok3:
+        if ok2 and out.strip() == "ok":
             return True, f"play/pause ({app})"
-    return ok, msg
+    return False, msg or "play/pause failed"
 
 
 def next_track() -> tuple[bool, str]:

@@ -16,9 +16,9 @@ Play/pause · next/prev · volume · mute · Mission Control · Spaces — witho
 |---------|--------|
 | **Fist → open palm** | Play / Pause |
 | **Open palm swipe** ← / → | Previous / Next track |
-| **Pinch + move** ↑ / ↓ | Volume ± |
-| **OK** (👌) | Mute toggle |
-| **Palm face-up** hold ~0.6s | Mission Control |
+| **Pinch + move** ↑ / ↓ | Volume ± (thumb+index; other fingers relaxed) |
+| **OK** (👌) hold ~0.4s | Mute toggle |
+| **👍 hold** ~0.7s | Mission Control |
 | **Two fingers** swipe ← / → | Switch Desktop Space |
 | **Fist hold** ~0.8s | Arm / Disarm recognition (safety) |
 
@@ -39,17 +39,34 @@ Or reuse an existing venv that already has `mediapipe==0.10.35`.
 
 ## Run
 
-Menu bar + preview:
+Menu bar (tray):
 
 ```bash
 cd cv_desk
 PYTHONPATH=. python -m cv_desk
 ```
 
+### macOS `.app` (recommended)
+
+Points at this repo + your existing venv (no fat freeze):
+
+```bash
+./scripts/build_app.sh
+open "dist/CV Desk.app"
+```
+
+Then in the **CV** menu bar icon: **Show Preview** (native window), **Launch at Login**, sensitivity presets.
+
 Preview / debug only (no tray):
 
 ```bash
 PYTHONPATH=. python -m cv_desk --cli
+```
+
+Calibrate sensitivity:
+
+```bash
+PYTHONPATH=. python -m cv_desk --calibrate
 ```
 
 ### Permissions (required)

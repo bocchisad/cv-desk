@@ -1,11 +1,12 @@
 {
-  "camera_index": 0,
+  "camera_index": "auto",
   "preview": true,
   "armed": true,
-  "cooldown_sec": 0.55,
-  "volume_step": 4,
-  "swipe_vx": 0.55,
-  "pinch_vol_sensitivity": 1.8,
+  "sensitivity_preset": "normal",
+  "cooldown_sec": 0.40,
+  "volume_step": 2,
+  "swipe_vx": 0.38,
+  "pinch_vol_sensitivity": 2.0,
   "actions": {
     "play_pause": true,
     "next_prev": true,
