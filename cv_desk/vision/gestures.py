@@ -117,7 +117,8 @@ def is_pinch(lms) -> bool:
     """Natural volume pinch: thumb+index close, and not a clear OK sign."""
     hs = hand_size(lms)
     pin = _d(lms[THUMB_TIP], lms[INDEX_TIP]) / hs
-    if pin > 0.42:
+    # Tight enough that opening the hand clearly ends the session (snap/volume).
+    if pin > 0.34:
         return False
     # OK (three fingers up) is mute — don't treat as volume.
     if is_ok(lms):
@@ -176,6 +177,24 @@ def is_two_finger(lms) -> bool:
     )
 
 
+def is_three_finger(lms) -> bool:
+    """Index+middle+ring up, pinky not extended — App Exposé hold.
+
+    Soft pinky check: webcam angles often leave the pinky slightly raised,
+    so require only that it is clearly less extended than the ring tip.
+    """
+    if not (
+        finger_up(lms, INDEX_TIP, INDEX_PIP)
+        and finger_up(lms, MIDDLE_TIP, MIDDLE_PIP)
+        and finger_up(lms, RING_TIP, RING_PIP)
+    ):
+        return False
+    # Pinky clearly up like an open palm → not three-finger.
+    if finger_up(lms, PINKY_TIP, PINKY_PIP) and lms[PINKY_TIP].y < lms[RING_TIP].y + 0.02:
+        return False
+    return True
+
+
 def palm_center(lms) -> tuple[float, float]:
     ids = (WRIST, INDEX_MCP, MIDDLE_MCP, 13, 17)
     xs = [lms[i].x for i in ids]
@@ -195,6 +214,9 @@ class GestureEngine:
     pinch_arm_sec: float = 0.28
     pinch_deadzone: float = 0.008
     thumbs_hold_sec: float = 0.70
+    three_hold_sec: float = 0.55
+    snap_hold_sec: float = 0.45  # still pinch until HUD shows SNAP ✓, then open
+    snap_max_sec: float = 2.5
 
     armed: bool = True
     last_action_at: float = 0.0
@@ -205,6 +227,9 @@ class GestureEngine:
     _was_fist: bool = False
     _fist_released_at: float | None = None
     _thumbs_since: float | None = None
+    _three_since: float | None = None
+    _three_miss: int = 0
+    _three_latched: bool = False
     _mc_block_until: float = 0.0
     _cx_hist: list[tuple[float, float]] = field(default_factory=list)
     _pinch_y0: float | None = None
@@ -215,6 +240,8 @@ class GestureEngine:
     _pinch_armed: bool = False
     _pinch_dir: int = 0
     _pinch_last_motion_at: float = 0.0
+    _pinch_did_volume: bool = False
+    _pinch_snap_ready: bool = False
     _ok_latched: bool = False
     _ok_since: float | None = None
     _mute_block_until: float = 0.0
@@ -241,6 +268,17 @@ class GestureEngine:
         self._pinch_dir = 0
         self._pinch_hold_until = 0.0
         self._pinch_last_motion_at = 0.0
+        self._pinch_did_volume = False
+        self._pinch_snap_ready = False
+
+    def _finish_pinch_session(self, now: float) -> str | None:
+        """On pinch release: screenshot only if snap was armed (still hold)."""
+        did_vol = self._pinch_did_volume
+        ready = self._pinch_snap_ready
+        self._reset_pinch()
+        if did_vol or not ready:
+            return None
+        return self._fire("screenshot")
 
     def on_hand_lost(self) -> None:
         """Call when MediaPipe reports no hand — pinch dir must not stick."""
@@ -248,7 +286,10 @@ class GestureEngine:
         self._cx_hist.clear()
         self._ok_since = None
         self._ok_latched = False
-        if self.last_label.startswith(("volume", "pinch", "ok")):
+        self._three_since = None
+        self._three_miss = 0
+        self._thumbs_since = None
+        if self.last_label.startswith(("volume", "pinch", "ok", "3", "👍", "SNAP")):
             self.last_label = "idle"
 
     def _commit_swipe(self, direction: int, now: float, *, palm_track: bool = False) -> None:
@@ -301,6 +342,7 @@ class GestureEngine:
         pinch = is_pinch(lms)
         ok = is_ok(lms)
         two = is_two_finger(lms)
+        three = is_three_finger(lms)
         thumbs = is_thumbs_up(lms)
 
         # --- Closed hand: arm-toggle (strict) + play/pause intent (loose) ---
@@ -373,10 +415,10 @@ class GestureEngine:
             return None
         self._thumbs_since = None
 
-        # Volume pinch: arm → smooth Y → deadzone → soft direction lock → ±1 step.
+        # Volume pinch / screenshot: hold still → SNAP ✓ → open hand.
+        # Moving after volume arms → volume only (no screenshot).
         if pinch:
-            self._pinch_hold_until = now + 0.12
-        if pinch or now < self._pinch_hold_until:
+            self._pinch_hold_until = now + 0.18
             raw_y = (lms[THUMB_TIP].y + lms[INDEX_TIP].y) / 2
             self._ok_since = None
 
@@ -388,44 +430,54 @@ class GestureEngine:
                 self._pinch_acc = 0.0
                 self._pinch_dir = 0
                 self._pinch_last_motion_at = now
+                self._pinch_did_volume = False
+                self._pinch_snap_ready = False
                 self.last_label = "pinch…"
                 return None
 
-            # Heavy EMA — kills webcam jitter / depth wobble.
             self._pinch_y_smooth = 0.82 * self._pinch_y_smooth + 0.18 * raw_y
+            held = (now - self._pinch_since) if self._pinch_since is not None else 0.0
 
             if not self._pinch_armed:
                 self._pinch_y0 = self._pinch_y_smooth
-                if self._pinch_since is not None and now - self._pinch_since >= self.pinch_arm_sec:
+                if held >= self.pinch_arm_sec:
                     self._pinch_armed = True
                     self._pinch_acc = 0.0
                     self._pinch_dir = 0
-                    self.last_label = "volume"
                 else:
                     self.last_label = "pinch…"
-                return None
+                    return None
+
+            # Still long enough without volume → arm screenshot on release.
+            if (
+                not self._pinch_did_volume
+                and self._pinch_acc < 0.55
+                and held >= self.snap_hold_sec
+            ):
+                self._pinch_snap_ready = True
 
             if self._pinch_y0 is None:
                 self._pinch_y0 = self._pinch_y_smooth
-                self.last_label = "volume"
-                return None
 
-            dy = self._pinch_y0 - self._pinch_y_smooth  # up = +
+            dy = self._pinch_y0 - self._pinch_y_smooth
             self._pinch_y0 = self._pinch_y_smooth
             dead = self.pinch_deadzone
             if abs(dy) < dead:
-                # Pause long enough → allow next gesture to pick a new direction.
                 if self._pinch_dir and now - self._pinch_last_motion_at > 0.35:
                     self._pinch_dir = 0
                     self._pinch_acc = 0.0
-                self.last_label = "volume"
+                if self._pinch_snap_ready and not self._pinch_did_volume:
+                    self.last_label = "SNAP ✓ open"
+                elif not self._pinch_did_volume:
+                    self.last_label = f"snap {held:.1f}s"
+                else:
+                    self.last_label = "volume"
                 return None
 
             self._pinch_last_motion_at = now
             if self._pinch_dir == 0:
                 self._pinch_dir = 1 if dy > 0 else -1
             elif dy * self._pinch_dir < 0:
-                # Reverse: easier flip after a pause / clear counter-move.
                 if abs(dy) < dead * 1.6:
                     self.last_label = "volume"
                     return None
@@ -435,14 +487,32 @@ class GestureEngine:
             if dy * self._pinch_dir > 0:
                 self._pinch_acc += abs(dy) * self.pinch_vol_sensitivity * 38
 
+            # Clear motion cancels pending snap.
+            if self._pinch_acc >= 0.55:
+                self._pinch_snap_ready = False
+
             self.last_label = "volume↑" if self._pinch_dir > 0 else "volume↓"
             if self._pinch_acc >= 1.0 and self._ready():
                 self._pinch_acc -= 1.0
                 self.last_action_at = now
                 self._mute_block_until = now + 0.7
+                self._pinch_did_volume = True
+                self._pinch_snap_ready = False
                 return "volume_up" if self._pinch_dir > 0 else "volume_down"
             return None
-        self._reset_pinch()
+
+        # Pinch ended: keep a tiny grace only mid-volume; else evaluate snap.
+        if self._pinch_since is not None:
+            if (
+                now < self._pinch_hold_until
+                and (self._pinch_did_volume or (self._pinch_armed and self._pinch_acc >= 0.45))
+            ):
+                self.last_label = "volume"
+                return None
+            snap = self._finish_pinch_session(now)
+            if snap:
+                self.last_label = "screenshot"
+                return snap
 
         # OK → mute only after a short hold (avoids flash during pinch setup).
         if ok and now >= self._mute_block_until:
@@ -461,6 +531,49 @@ class GestureEngine:
             return None
         self._ok_since = None
         self._ok_latched = False
+
+        # 3 fingers hold (still) → App Exposé; swipe stays on 2 fingers.
+        # Hysteresis: tolerate a few missed frames so it doesn't fire "every other try".
+        if three:
+            self._three_miss = 0
+            if self._three_latched:
+                self.last_label = "3 fingers"
+                return None
+            h_peak = self._peak_abs_vx()
+            if h_peak >= 0.55:
+                self._three_since = None
+                self.last_label = "3 fingers"
+                return None
+            if self._three_since is None:
+                self._three_since = now
+                self._cx_hist.clear()  # don't inherit swipe jitter into the hold
+            held = now - self._three_since
+            if held >= self.three_hold_sec:
+                fired = self._fire("app_expose")
+                if fired:
+                    self._three_latched = True
+                    self._three_since = None
+                    self.last_label = "App Exposé"
+                    return fired
+                self.last_label = "3✋…"
+                return None
+            self.last_label = f"3✋ {held:.1f}s"
+            return None
+
+        # Left three-finger pose (with short flicker grace while counting hold).
+        if self._three_since is not None and not self._three_latched:
+            self._three_miss += 1
+            if self._three_miss <= 5:
+                held = now - self._three_since
+                self.last_label = f"3✋ {held:.1f}s"
+                return None
+            self._three_since = None
+            self._three_miss = 0
+        else:
+            self._three_since = None
+            self._three_miss = 0
+            # Must fully leave the pose before the next Exposé.
+            self._three_latched = False
 
         # Swipes (Mission Control is thumbs-up above — no palm↑ conflict).
         if now < self._swipe_cool_until:

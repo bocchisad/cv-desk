@@ -13,6 +13,8 @@
     "volume": true,
     "mute": true,
     "mission_control": true,
-    "spaces": true
+    "spaces": true,
+    "app_expose": true,
+    "screenshot": true
   }
 }

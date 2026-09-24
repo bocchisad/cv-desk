@@ -164,6 +164,67 @@ def space_right() -> tuple[bool, str]:
     return (True, "Space →") if ok else (False, msg)
 
 
+def app_expose() -> tuple[bool, str]:
+    # Control + Down Arrow — Application windows
+    ok, msg = _osascript(
+        'tell application "System Events" to key code 125 using {control down}'
+    )
+    return (True, "App Exposé") if ok else (False, msg)
+
+
+def screenshot() -> tuple[bool, str]:
+    """
+    Capture the main display to Desktop.
+
+    Synthetic ⌘⇧3 via System Events often returns OK but writes nothing on
+    modern macOS. Quartz CGWindowListCreateImage is reliable when the process
+    may read the screen (Screen Recording for Terminal / CV Desk.app).
+    """
+    from pathlib import Path
+
+    desktop = Path.home() / "Desktop"
+    desktop.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y-%m-%d at %H.%M.%S")
+    path = desktop / f"Screenshot {stamp}.png"
+
+    try:
+        from Foundation import NSURL  # type: ignore
+        from Quartz import (  # type: ignore
+            CGImageDestinationAddImage,
+            CGImageDestinationCreateWithURL,
+            CGImageDestinationFinalize,
+            CGRectInfinite,
+            CGWindowListCreateImage,
+            kCGNullWindowID,
+            kCGWindowImageDefault,
+            kCGWindowListOptionOnScreenOnly,
+        )
+    except Exception as e:
+        return False, f"screenshot deps: {e}"
+
+    try:
+        img = CGWindowListCreateImage(
+            CGRectInfinite,
+            kCGWindowListOptionOnScreenOnly,
+            kCGNullWindowID,
+            kCGWindowImageDefault,
+        )
+        if img is None:
+            return False, "screenshot blocked (grant Screen Recording to CV Desk / Terminal)"
+        url = NSURL.fileURLWithPath_(str(path))
+        dest = CGImageDestinationCreateWithURL(url, "public.png", 1, None)
+        if dest is None:
+            return False, "screenshot: cannot write PNG"
+        CGImageDestinationAddImage(dest, img, None)
+        if not CGImageDestinationFinalize(dest):
+            return False, "screenshot: finalize failed"
+        if not path.is_file():
+            return False, "screenshot: file missing after write"
+        return True, f"screenshot → {path.name}"
+    except Exception as e:
+        return False, str(e)
+
+
 ACTIONS: dict[str, Callable[[], tuple[bool, str]]] = {
     "play_pause": play_pause,
     "next": next_track,
@@ -172,4 +233,6 @@ ACTIONS: dict[str, Callable[[], tuple[bool, str]]] = {
     "mission_control": mission_control,
     "space_left": space_left,
     "space_right": space_right,
+    "app_expose": app_expose,
+    "screenshot": screenshot,
 }

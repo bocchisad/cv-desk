@@ -2,7 +2,7 @@
 
 macOS menu-bar app: **control your desk with hand gestures** (MediaPipe Hands).
 
-Play/pause · next/prev · volume · mute · Mission Control · Spaces — without touching the keyboard.
+Play/pause · next/prev · volume · mute · Mission Control · App Exposé · screenshot · Spaces — without touching the keyboard.
 
 ![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-black)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
@@ -17,10 +17,12 @@ Play/pause · next/prev · volume · mute · Mission Control · Spaces — witho
 | **Fist → open palm** | Play / Pause |
 | **Open palm swipe** ← / → | Previous / Next track |
 | **Pinch + move** ↑ / ↓ | Volume ± (thumb+index; other fingers relaxed) |
+| **Pinch hold still** → HUD `SNAP ✓` → **open** | Screenshot (Desktop PNG) |
 | **OK** (👌) hold ~0.4s | Mute toggle |
 | **👍 hold** ~0.7s | Mission Control |
+| **3 fingers** hold ~0.55s (index+middle+ring) | App Exposé |
 | **Two fingers** swipe ← / → | Switch Desktop Space |
-| **Fist hold** ~0.8s | Arm / Disarm recognition (safety) |
+| **Fist hold** ~1.2s | Arm / Disarm recognition (safety) |
 
 ---
 

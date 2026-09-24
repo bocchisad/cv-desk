@@ -99,6 +99,8 @@ class CVDeskApp:
             "mission_control": ("mission_control", actions.mission_control),
             "space_left": ("spaces", actions.space_left),
             "space_right": ("spaces", actions.space_right),
+            "app_expose": ("app_expose", actions.app_expose),
+            "screenshot": ("screenshot", actions.screenshot),
         }
 
         if action in ("volume_up", "volume_down"):
@@ -171,9 +173,9 @@ class CVDeskApp:
         """Preview window + console (no menu bar). HighGUI stays on the main thread."""
         print(f"CV Desk v{__version__}")
         print(f"Camera [{self.camera_index}]: {self.camera_name}")
-        print("Fist hold ~1.2s = arm/disarm | fist→palm = play/pause | pinch↕ = volume")
-        print("Palm swipe = next/prev | 2-finger swipe = Spaces | OK hold = mute | 👍 hold = Mission Control")
-        print("Accessibility: System Settings → Privacy → Accessibility → Terminal/Python")
+        print("Pinch hold still → SNAP ✓ → open = screenshot | pinch↕ = volume")
+        print("3-finger hold = App Exposé | 2-finger swipe = Spaces | 👍 = Mission Control")
+        print("Privacy: Accessibility + Screen Recording → Terminal / CV Desk.app")
         self.cam.start()
         try:
             self.loop_vision(opencv_preview=True)

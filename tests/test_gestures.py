@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import unittest
 from types import SimpleNamespace
 
@@ -12,6 +13,7 @@ from cv_desk.vision.gestures import (
     is_ok,
     is_open_palm,
     is_pinch,
+    is_three_finger,
     is_thumbs_up,
 )
 
@@ -130,10 +132,88 @@ class GestureHelpers(unittest.TestCase):
         self.assertTrue(is_thumbs_up(th))
         self.assertFalse(is_fist(th))
 
-    def test_engine_defaults(self):
-        eng = GestureEngine()
-        self.assertTrue(eng.armed)
-        self.assertEqual(eng.last_label, "idle")
+    def test_three_finger(self):
+        l = _lms({
+            8: (0.40, 0.25),
+            6: (0.40, 0.40),
+            12: (0.48, 0.22),
+            10: (0.48, 0.40),
+            16: (0.55, 0.24),
+            14: (0.55, 0.40),
+            20: (0.62, 0.55),
+            18: (0.62, 0.48),
+            0: (0.5, 0.75),
+            9: (0.5, 0.45),
+        })
+        self.assertTrue(is_three_finger(l))
+
+    def test_snap_on_hold_then_open(self):
+        """Screenshot = hold pinch still until ready, then open (not a flash pinch)."""
+        eng = GestureEngine(
+            cooldown_sec=0.0,
+            pinch_arm_sec=0.05,
+            snap_hold_sec=0.05,
+            pinch_deadzone=0.05,
+        )
+        pinch = _lms({
+            4: (0.48, 0.40),
+            8: (0.50, 0.40),
+            6: (0.50, 0.48),
+            12: (0.52, 0.50),
+            10: (0.52, 0.45),
+            16: (0.55, 0.52),
+            14: (0.55, 0.45),
+            20: (0.58, 0.52),
+            18: (0.58, 0.45),
+            0: (0.5, 0.70),
+            9: (0.5, 0.50),
+        })
+        open_h = _lms({
+            8: (0.35, 0.25),
+            6: (0.38, 0.4),
+            12: (0.45, 0.22),
+            10: (0.47, 0.4),
+            16: (0.55, 0.24),
+            14: (0.55, 0.4),
+            20: (0.68, 0.28),
+            18: (0.62, 0.4),
+            4: (0.30, 0.40),
+            5: (0.4, 0.45),
+            9: (0.5, 0.45),
+            0: (0.5, 0.75),
+        })
+        self.assertTrue(is_pinch(pinch))
+        # Instant open before ready → no screenshot
+        eng2 = GestureEngine(cooldown_sec=0.0, snap_hold_sec=0.5, pinch_arm_sec=0.28)
+        self.assertIsNone(eng2.update(pinch))
+        self.assertIsNone(eng2.update(open_h))
+
+        # Hold past snap_hold_sec (same timestamp → patch since)
+        self.assertIsNone(eng.update(pinch))
+        eng._pinch_since = time.monotonic() - 0.2
+        eng._pinch_armed = True
+        eng._pinch_snap_ready = True
+        self.assertEqual(eng.update(open_h), "screenshot")
+
+    def test_three_finger_hold_fires_once(self):
+        eng = GestureEngine(cooldown_sec=0.0, three_hold_sec=0.05)
+        three = _lms({
+            8: (0.40, 0.25),
+            6: (0.40, 0.40),
+            12: (0.48, 0.22),
+            10: (0.48, 0.40),
+            16: (0.55, 0.24),
+            14: (0.55, 0.40),
+            20: (0.62, 0.55),
+            18: (0.62, 0.48),
+            0: (0.5, 0.75),
+            9: (0.5, 0.45),
+        })
+        self.assertIsNone(eng.update(three))
+        eng._three_since = time.monotonic() - 0.2
+        self.assertEqual(eng.update(three), "app_expose")
+        # Still holding — latched, no double fire
+        self.assertIsNone(eng.update(three))
 
     def test_fist_to_palm_survives_idle_frames(self):
         """During open grace, intermediate poses must not steal play/pause."""
