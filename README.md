@@ -1,13 +1,45 @@
 # CV Desk
 
-macOS menu-bar app: **control your desk with hand gestures** (MediaPipe Hands).
-
-Play/pause · next/prev · volume · mute · Mission Control · App Exposé · screenshot · Spaces — without touching the keyboard.
+**Control your Mac desk with hand gestures** — play/pause, volume, Spaces, Mission Control, App Exposé, screenshot — from a menu-bar app powered by MediaPipe Hands.
 
 ![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-black)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Version](https://img.shields.io/badge/version-1.0.1-blue)
+![Status](https://img.shields.io/badge/release-source%20only-orange)
+
+> **v1.0 is source-first.** Run from a venv (or a local dev `.app` wrapper). There is no notarized binary yet — see [Limitations](#limitations).
+
+<!-- Add after you drop files into docs/media/:
+![Preview](docs/media/preview.gif)
+-->
+
+---
+
+## Quick start
+
+```bash
+git clone https://github.com/bocchisad/cv-desk.git
+cd cv-desk
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+PYTHONPATH=. python -m cv_desk
+```
+
+Look for the **CV** icon in the menu bar → **Show Preview**.
+
+### Permissions (required)
+
+Grant these to **Python** / **Terminal** / your IDE (not “CV Desk” — the launcher eventually runs venv Python):
+
+| Permission | Why |
+|------------|-----|
+| **Camera** | Hand tracking |
+| **Accessibility** | Spaces, Mission Control, App Exposé, System Events |
+| **Screen Recording** | Screenshot (Quartz capture → Desktop) |
+
+Config lives at: `~/Library/Application Support/CVDesk/config.json`
 
 ---
 
@@ -17,72 +49,47 @@ Play/pause · next/prev · volume · mute · Mission Control · App Exposé · s
 |---------|--------|
 | **Fist → open palm** | Play / Pause |
 | **Open palm swipe** ← / → | Previous / Next track |
-| **Pinch + move** ↑ / ↓ | Volume ± (thumb+index; other fingers relaxed) |
-| **Pinch hold still** → HUD `SNAP ✓` → **open** | Screenshot (Desktop PNG) |
-| **OK** (👌) hold ~0.4s | Mute toggle |
+| **Pinch + move** ↑ / ↓ | Volume ± |
+| **Pinch hold still** → HUD `SNAP ✓` → **open** | Screenshot |
+| **OK** hold ~0.4s | Mute |
 | **👍 hold** ~0.7s | Mission Control |
-| **3 fingers** hold ~0.55s (index+middle+ring) | App Exposé |
-| **Two fingers** swipe ← / → | Switch Desktop Space |
-| **Fist hold** ~1.2s | Arm / Disarm recognition (safety) |
+| **3 fingers** hold ~0.55s | App Exposé |
+| **Two fingers** swipe ← / → | Desktop Space |
+| **Fist hold** ~1.2s | Arm / Disarm |
 
-**Per-app profiles:** tray → **Profiles** — enable/disable gesture groups for the frontmost app (`Name*` = custom). Same gestures everywhere; sensitivity stays global.
+**Per-app profiles:** menu → **Profiles** — enable/disable action groups for the frontmost app (`Name*` = custom). Gestures stay the same; sensitivity is global.
 
----
-
-## Install
-
-```bash
-cd cv_desk
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Or reuse an existing venv that already has `mediapipe==0.10.35`.
+**Sensitivity:** Low / Normal / High, or `PYTHONPATH=. python -m cv_desk --calibrate`
 
 ---
 
-## Run
+## Run options
 
-Menu bar (tray):
+| Mode | Command |
+|------|---------|
+| Menu bar (default) | `PYTHONPATH=. python -m cv_desk` |
+| Preview window only | `PYTHONPATH=. python -m cv_desk --cli` |
+| List cameras | `PYTHONPATH=. python -m cv_desk --list-cameras` |
+| Calibrate | `PYTHONPATH=. python -m cv_desk --calibrate` |
 
-```bash
-cd cv_desk
-PYTHONPATH=. python -m cv_desk
-```
-
-### macOS `.app` (dev-only wrapper)
-
-Points at this repo + a nearby `.venv` (paths resolved at launch — **not** a redistributable freeze):
+### Dev `.app` (optional, this machine only)
 
 ```bash
 ./scripts/build_app.sh
 open "dist/CV Desk.app"
 ```
 
-Then in the **CV** menu: **Show Preview**, **Launch at Login**, **Profiles**, sensitivity presets.
+Resolves the repo + `.venv` at **launch**. Not for redistribution / App Store / Gatekeeper-friendly sharing.
 
-Preview / debug only (no tray):
+---
 
-```bash
-PYTHONPATH=. python -m cv_desk --cli
-```
+## Limitations
 
-Calibrate sensitivity:
-
-```bash
-PYTHONPATH=. python -m cv_desk --calibrate
-```
-
-### Permissions (required)
-
-Grant these to **Python** / **Terminal** / your IDE (the `.app` is a shell → venv python):
-
-1. **Camera**
-2. **Accessibility** — Mission Control, Spaces, App Exposé, System Events
-3. **Screen Recording** — screenshot (Quartz capture)
-
-Config: `~/Library/Application Support/CVDesk/config.json`
+- **macOS 13+ only** (no Windows/Linux in v1)
+- **Source / venv install** — no frozen notarized `.app` in GitHub Releases
+- Privacy prompts attach to **Python**, not a branded app identity
+- Continuity Camera / multiple cams: prefer auto FaceTime; switch in the tray if needed
+- Gesture accuracy depends on lighting, camera angle, and MediaPipe
 
 ---
 
@@ -90,35 +97,30 @@ Config: `~/Library/Application Support/CVDesk/config.json`
 
 ```
 cv_desk/
-  cv_desk/
-    app.py              # tray + vision loop
-    config.py           # atomic config I/O
-    profiles.py         # per-app enable masks
-    frontmost.py        # sticky NSWorkspace frontmost
-    login_item.py       # LaunchAgent
-    sensitivity.py      # presets + calibrate helpers
-    calibrate.py
-    vision/camera.py    # MediaPipe detect thread
-    vision/gestures.py  # state machine
-    actions/macos.py    # volume, media, MC, Spaces, screenshot
-    ui/preview.py
-    ui/cocoa_preview.py
-  config.default.json
-  scripts/build_app.sh
-  requirements.txt
+  app.py              # tray + vision loop
+  config.py           # atomic config I/O
+  profiles.py         # per-app enable masks
+  frontmost.py        # sticky frontmost app
+  login_item.py       # Launch at Login
+  vision/             # camera + GestureEngine
+  actions/macos.py    # volume, media, MC, Spaces, screenshot
+  ui/                 # OpenCV HUD + Cocoa preview
 ```
+
+Design notes: [`docs/`](docs/).
 
 ---
 
-## Product notes
+## Development
 
-- Cooldown ~0.40s (normal preset) between discrete actions  
-- Disarm with fist-hold when you need to gesture at the camera for other apps  
-- Per-app toggles: tray **Profiles** (or `config.json` → `profiles`)  
-- v1 is **macOS-only**; Windows later  
+```bash
+PYTHONPATH=. python -m unittest discover -s tests -q
+```
+
+See [`CHANGELOG.md`](CHANGELOG.md) for release history.
 
 ---
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
