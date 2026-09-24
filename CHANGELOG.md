@@ -4,6 +4,13 @@ All notable changes to CV Desk are documented here.
 
 Format inspired by [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [1.0.2] — 2026-09-24
+
+### Changed
+
+- README rewritten for a source-first public release (no media assets required)
+- Release docs: checklist, security, contributing
+
 ## [1.0.1] — 2026-09-24
 
 ### Fixed
@@ -41,6 +48,7 @@ Format inspired by [Keep a Changelog](https://keepachangelog.com/). Versioning: 
 
 - Initial CV Desk prototype (tray, gestures, packaging scripts)
 
+[1.0.2]: https://github.com/bocchisad/cv-desk/releases/tag/v1.0.2
 [1.0.1]: https://github.com/bocchisad/cv-desk/releases/tag/v1.0.1
 [1.0.0]: https://github.com/bocchisad/cv-desk/releases/tag/v1.0.1
 [0.1.0]: https://github.com/bocchisad/cv-desk/commits/main

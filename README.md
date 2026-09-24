@@ -1,18 +1,18 @@
 # CV Desk
 
-**Control your Mac desk with hand gestures** — play/pause, volume, Spaces, Mission Control, App Exposé, screenshot — from a menu-bar app powered by MediaPipe Hands.
+**Control your Mac desk with hand gestures** — play/pause, volume, Spaces, Mission Control, App Exposé, screenshot — from a menu-bar app powered by [MediaPipe](https://ai.google.dev/edge/mediapipe) Hands.
 
 ![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-black)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Version](https://img.shields.io/badge/version-1.0.1-blue)
-![Status](https://img.shields.io/badge/release-source%20only-orange)
+![Version](https://img.shields.io/badge/version-1.0.2-blue)
+![Release](https://img.shields.io/github/v/release/bocchisad/cv-desk)
 
-> **v1.0 is source-first.** Run from a venv (or a local dev `.app` wrapper). There is no notarized binary yet — see [Limitations](#limitations).
+---
 
-<!-- Add after you drop files into docs/media/:
-![Preview](docs/media/preview.gif)
--->
+## Why
+
+Hands free for the trackpad and keyboard — but the desk still needs play/pause, volume, Spaces, and a quick screenshot. CV Desk watches one webcam hand and maps a small, deliberate gesture set onto those actions.
 
 ---
 
@@ -27,19 +27,19 @@ pip install -r requirements.txt
 PYTHONPATH=. python -m cv_desk
 ```
 
-Look for the **CV** icon in the menu bar → **Show Preview**.
+Menu bar icon: **CV** → **Show Preview**. Wave a hand in front of the camera.
 
-### Permissions (required)
+### Permissions
 
-Grant these to **Python** / **Terminal** / your IDE (not “CV Desk” — the launcher eventually runs venv Python):
+Grant these to **Python** / **Terminal** / your IDE (the process that runs the venv — not a branded `.app` identity):
 
-| Permission | Why |
-|------------|-----|
+| Permission | Needed for |
+|------------|------------|
 | **Camera** | Hand tracking |
 | **Accessibility** | Spaces, Mission Control, App Exposé, System Events |
-| **Screen Recording** | Screenshot (Quartz capture → Desktop) |
+| **Screen Recording** | Screenshot → Desktop PNG |
 
-Config lives at: `~/Library/Application Support/CVDesk/config.json`
+Config: `~/Library/Application Support/CVDesk/config.json`
 
 ---
 
@@ -47,80 +47,61 @@ Config lives at: `~/Library/Application Support/CVDesk/config.json`
 
 | Gesture | Action |
 |---------|--------|
-| **Fist → open palm** | Play / Pause |
-| **Open palm swipe** ← / → | Previous / Next track |
-| **Pinch + move** ↑ / ↓ | Volume ± |
-| **Pinch hold still** → HUD `SNAP ✓` → **open** | Screenshot |
-| **OK** hold ~0.4s | Mute |
-| **👍 hold** ~0.7s | Mission Control |
-| **3 fingers** hold ~0.55s | App Exposé |
-| **Two fingers** swipe ← / → | Desktop Space |
-| **Fist hold** ~1.2s | Arm / Disarm |
+| Fist → open palm | Play / Pause |
+| Open palm swipe ← / → | Previous / Next track |
+| Pinch + move ↑ / ↓ | Volume ± |
+| Pinch hold still → HUD `SNAP ✓` → open | Screenshot |
+| OK hold ~0.4s | Mute |
+| 👍 hold ~0.7s | Mission Control |
+| 3 fingers hold ~0.55s | App Exposé |
+| 2 fingers swipe ← / → | Switch Desktop Space |
+| Fist hold ~1.2s | Arm / Disarm |
 
-**Per-app profiles:** menu → **Profiles** — enable/disable action groups for the frontmost app (`Name*` = custom). Gestures stay the same; sensitivity is global.
-
-**Sensitivity:** Low / Normal / High, or `PYTHONPATH=. python -m cv_desk --calibrate`
+**Profiles** (menu → Profiles): per frontmost app, turn action groups on/off. Gestures stay global; sensitivity stays global (Low / Normal / High, or `--calibrate`).
 
 ---
 
-## Run options
+## Commands
 
-| Mode | Command |
-|------|---------|
-| Menu bar (default) | `PYTHONPATH=. python -m cv_desk` |
-| Preview window only | `PYTHONPATH=. python -m cv_desk --cli` |
-| List cameras | `PYTHONPATH=. python -m cv_desk --list-cameras` |
+| | |
+|--|--|
+| Menu bar | `PYTHONPATH=. python -m cv_desk` |
+| Preview only | `PYTHONPATH=. python -m cv_desk --cli` |
+| Cameras | `PYTHONPATH=. python -m cv_desk --list-cameras` |
 | Calibrate | `PYTHONPATH=. python -m cv_desk --calibrate` |
+| Tests | `PYTHONPATH=. python -m unittest discover -s tests -q` |
 
-### Dev `.app` (optional, this machine only)
+Optional **dev `.app`** (this machine only — resolves repo + `.venv` at launch, not redistributable):
 
 ```bash
 ./scripts/build_app.sh
 open "dist/CV Desk.app"
 ```
 
-Resolves the repo + `.venv` at **launch**. Not for redistribution / App Store / Gatekeeper-friendly sharing.
+---
+
+## Limitations (v1)
+
+- macOS 13+ only
+- **Source install** — GitHub Releases ship source tags, not a notarized binary
+- TCC prompts attach to **Python**, not “CV Desk”
+- Lighting / camera angle affect MediaPipe reliability
+- Continuity Camera: prefer auto FaceTime; switch camera in the tray if needed
 
 ---
 
-## Limitations
-
-- **macOS 13+ only** (no Windows/Linux in v1)
-- **Source / venv install** — no frozen notarized `.app` in GitHub Releases
-- Privacy prompts attach to **Python**, not a branded app identity
-- Continuity Camera / multiple cams: prefer auto FaceTime; switch in the tray if needed
-- Gesture accuracy depends on lighting, camera angle, and MediaPipe
-
----
-
-## Architecture
+## Layout
 
 ```
-cv_desk/
-  app.py              # tray + vision loop
-  config.py           # atomic config I/O
-  profiles.py         # per-app enable masks
-  frontmost.py        # sticky frontmost app
-  login_item.py       # Launch at Login
-  vision/             # camera + GestureEngine
-  actions/macos.py    # volume, media, MC, Spaces, screenshot
-  ui/                 # OpenCV HUD + Cocoa preview
+cv_desk/           package (tray, vision, actions, UI)
+config.default.json
+scripts/build_app.sh
+tests/
+docs/              design notes + release checklist
 ```
-
-Design notes: [`docs/`](docs/).
-
----
-
-## Development
-
-```bash
-PYTHONPATH=. python -m unittest discover -s tests -q
-```
-
-See [`CHANGELOG.md`](CHANGELOG.md) for release history.
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — [LICENSE](LICENSE). Changelog: [CHANGELOG.md](CHANGELOG.md). Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
