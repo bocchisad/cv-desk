@@ -19,6 +19,10 @@
 | Two-finger horizontal swipe | Desktop Space ←/→ |
 | Fist hold ~1.2s | Arm/disarm recognition |
 
+## Per-app profiles (Phase D)
+
+Frontmost app can override action on/off only (no sensitivity). Tray → **Profiles**.
+
 ## Non-goals v1
 
 Mouse cursor, drawing, Windows, voice, multi-monitor UI chrome.

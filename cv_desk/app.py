@@ -11,9 +11,19 @@ import cv2
 from cv_desk import __version__
 from cv_desk.actions import macos as actions
 from cv_desk.config import load_config, save_config
+from cv_desk.frontmost import frontmost_app
 from cv_desk.login_item import disable as login_disable
 from cv_desk.login_item import enable as login_enable
 from cv_desk.login_item import is_enabled as login_is_enabled
+from cv_desk.profiles import (
+    ACTION_KEYS,
+    ACTION_LABELS,
+    clear_app_profile,
+    effective_actions,
+    has_app_profile,
+    is_enabled as profile_enabled,
+    set_app_action,
+)
 from cv_desk.sensitivity import (
     apply_to_config,
     apply_to_engine,
@@ -46,9 +56,27 @@ class CVDeskApp:
         self._status = f"cam: {name}"
         self._preview_lock = threading.Lock()
         self._preview_bgr = None
+        self._front_bundle = ""
+        self._front_name = "default"
+        self._front_at = 0.0
+
+    def refresh_frontmost(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._front_at < 0.45:
+            return
+        self._front_at = now
+        bid, name = frontmost_app()
+        self._front_bundle = bid
+        self._front_name = name or "default"
+
+    def profile_label(self) -> str:
+        name = self._front_name or "default"
+        if has_app_profile(self.cfg, self._front_bundle):
+            return f"{name}*"
+        return name
 
     def _enabled(self, key: str) -> bool:
-        return bool(self.cfg.get("actions", {}).get(key, True))
+        return profile_enabled(self.cfg, self._front_bundle, key)
 
     def apply_sensitivity(self, values: dict, preset: str) -> None:
         self.cfg = apply_to_config(self.cfg, values, preset)
@@ -84,6 +112,7 @@ class CVDeskApp:
     def dispatch(self, action: str | None) -> None:
         if not action:
             return
+        self.refresh_frontmost()
         if action == "toggle_arm":
             self.cfg["armed"] = self.engine.armed
             save_config(self.cfg)
@@ -140,6 +169,7 @@ class CVDeskApp:
             if frame is None:
                 time.sleep(0.01)
                 continue
+            self.refresh_frontmost()
             if lms is not None:
                 action = self.engine.update(lms)
                 self.dispatch(action)
@@ -148,7 +178,14 @@ class CVDeskApp:
             label = self.engine.last_label
             need_draw = self._show_preview or opencv_preview
             if need_draw:
-                vis = draw_preview(frame, lms, label, self.engine.armed, self._last_action_label)
+                vis = draw_preview(
+                    frame,
+                    lms,
+                    label,
+                    self.engine.armed,
+                    self._last_action_label,
+                    profile=self.profile_label(),
+                )
                 with self._preview_lock:
                     self._preview_bgr = vis
                 if opencv_preview:
@@ -175,6 +212,7 @@ class CVDeskApp:
         print(f"Camera [{self.camera_index}]: {self.camera_name}")
         print("Pinch hold still → SNAP ✓ → open = screenshot | pinch↕ = volume")
         print("3-finger hold = App Exposé | 2-finger swipe = Spaces | 👍 = Mission Control")
+        print("Per-app: tray Profiles menu toggles actions for the frontmost app")
         print("Privacy: Accessibility + Screen Recording → Terminal / CV Desk.app")
         self.cam.start()
         try:
@@ -220,6 +258,23 @@ def run_tray():
                     self.sens_calibrate,
                 ]
             )
+            self.profile_title = rumps.MenuItem("App: …")
+            self.profile_actions: dict[str, rumps.MenuItem] = {}
+            action_items = []
+            for key in ACTION_KEYS:
+                item = rumps.MenuItem(
+                    ACTION_LABELS[key],
+                    callback=self._make_toggle_action(key),
+                )
+                self.profile_actions[key] = item
+                action_items.append(item)
+            self.profile_reset = rumps.MenuItem(
+                "Reset this app to default", callback=self.reset_app_profile
+            )
+            self.profiles_item = rumps.MenuItem("Profiles")
+            self.profiles_item.update(
+                [self.profile_title, None, *action_items, None, self.profile_reset]
+            )
             self.login_item = rumps.MenuItem("Launch at Login", callback=self.toggle_login)
             self.status_item = rumps.MenuItem("Status: …")
             self.quit_item = rumps.MenuItem("Quit", callback=self.quit_app)
@@ -230,6 +285,7 @@ def run_tray():
                 self.preview_item,
                 self.cam_item,
                 self.sensitivity_item,
+                self.profiles_item,
                 self.login_item,
                 None,
                 self.status_item,
@@ -241,6 +297,7 @@ def run_tray():
             app_core._show_preview = False
             self.login_item.state = login_is_enabled()
             self._sync_sens_checks()
+            self._sync_profile_menu()
             app_core.cam.start()
             self._worker = threading.Thread(
                 target=lambda: app_core.loop_vision(opencv_preview=False),
@@ -248,11 +305,41 @@ def run_tray():
             )
             self._worker.start()
 
+        def _make_toggle_action(self, key: str):
+            def _cb(_):
+                app_core.refresh_frontmost(force=True)
+                bid = app_core._front_bundle
+                if not bid:
+                    rumps.notification("CV Desk", "Profiles", "No frontmost app bundle id")
+                    return
+                cur = effective_actions(app_core.cfg, bid).get(key, True)
+                app_core.cfg = set_app_action(app_core.cfg, bid, key, not cur)
+                save_config(app_core.cfg)
+                self._sync_profile_menu()
+                label = ACTION_LABELS[key]
+                state = "ON" if not cur else "OFF"
+                app_core._status = f"{app_core._front_name}: {label} {state}"
+                rumps.notification(
+                    "CV Desk",
+                    app_core._front_name,
+                    f"{label} → {state}",
+                )
+
+            return _cb
+
         def _sync_sens_checks(self):
             name = match_preset(app_core.cfg)
             self.sens_low.state = name == "low"
             self.sens_normal.state = name == "normal"
             self.sens_high.state = name == "high"
+
+        def _sync_profile_menu(self):
+            app_core.refresh_frontmost(force=True)
+            label = app_core.profile_label()
+            self.profile_title.title = f"App: {label[:36]}"
+            eff = effective_actions(app_core.cfg, app_core._front_bundle)
+            for key, item in self.profile_actions.items():
+                item.state = bool(eff.get(key, True))
 
         def _ensure_preview(self) -> CocoaPreview:
             nonlocal preview_win
@@ -269,11 +356,13 @@ def run_tray():
         @rumps.timer(1.0)
         def _tick(self, _):
             try:
+                app_core.refresh_frontmost()
                 self.status_item.title = f"Status: {app_core._status[:42]}"
                 self.armed_item.state = bool(app_core.engine.armed)
                 self.cam_item.title = f"Camera: {app_core.camera_name[:28]}"
                 self.login_item.state = login_is_enabled()
                 self._sync_sens_checks()
+                self._sync_profile_menu()
                 if app_core._show_preview and preview_win is not None and not preview_win.is_visible():
                     self._preview_closed()
             except Exception:
@@ -348,6 +437,19 @@ def run_tray():
                 message="PYTHONPATH=. python -m cv_desk --calibrate",
             )
             app_core._status = "calibrate: --calibrate"
+
+        def reset_app_profile(self, _):
+            app_core.refresh_frontmost(force=True)
+            bid = app_core._front_bundle
+            name = app_core._front_name
+            if not bid:
+                rumps.notification("CV Desk", "Profiles", "No frontmost app")
+                return
+            app_core.cfg = clear_app_profile(app_core.cfg, bid)
+            save_config(app_core.cfg)
+            self._sync_profile_menu()
+            app_core._status = f"{name}: default"
+            rumps.notification("CV Desk", name, "Reset to global actions")
 
         def toggle_login(self, sender):
             if login_is_enabled():

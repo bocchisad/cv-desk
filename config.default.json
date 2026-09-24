@@ -16,5 +16,6 @@
     "spaces": true,
     "app_expose": true,
     "screenshot": true
-  }
+  },
+  "profiles": {}
 }

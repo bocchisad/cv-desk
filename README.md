@@ -24,6 +24,8 @@ Play/pause · next/prev · volume · mute · Mission Control · App Exposé · s
 | **Two fingers** swipe ← / → | Switch Desktop Space |
 | **Fist hold** ~1.2s | Arm / Disarm recognition (safety) |
 
+**Per-app profiles:** tray → **Profiles** — toggle actions for the frontmost app (`Name*` = custom). Sensitivity stays global.
+
 ---
 
 ## Install

@@ -32,6 +32,7 @@ def draw_preview(
     label: str,
     armed: bool,
     last_action: str,
+    profile: str = "",
 ) -> np.ndarray:
     out = frame.copy()
     h, w = out.shape[:2]
@@ -47,8 +48,9 @@ def draw_preview(
                 cv2.circle(out, pts[i], 5, (40, 220, 255), -1, cv2.LINE_AA)
 
     # HUD bar
+    bar_h = 68 if profile else 52
     overlay = out.copy()
-    cv2.rectangle(overlay, (0, 0), (w, 52), (20, 22, 26), -1)
+    cv2.rectangle(overlay, (0, 0), (w, bar_h), (20, 22, 26), -1)
     cv2.addWeighted(overlay, 0.72, out, 0.28, 0, out)
     arm = "ON" if armed else "OFF"
     color = (100, 255, 140) if armed else (80, 80, 220)
@@ -63,4 +65,15 @@ def draw_preview(
         1,
         cv2.LINE_AA,
     )
+    if profile:
+        cv2.putText(
+            out,
+            f"app: {profile}",
+            (12, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (160, 200, 255),
+            1,
+            cv2.LINE_AA,
+        )
     return out

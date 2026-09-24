@@ -7,6 +7,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from cv_desk.profiles import merge_profile_maps
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PATH = ROOT / "config.default.json"
 USER_PATH = Path.home() / "Library" / "Application Support" / "CVDesk" / "config.json"
@@ -29,6 +31,7 @@ def load_config() -> dict[str, Any]:
         USER_PATH.write_text(json.dumps(user, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     merged = {**default, **user}
     merged["actions"] = {**default.get("actions", {}), **user.get("actions", {})}
+    merged["profiles"] = merge_profile_maps(default.get("profiles", {}), user.get("profiles", {}))
     return merged
 
 
