@@ -222,7 +222,6 @@ class GestureEngine:
     last_action_at: float = 0.0
     last_label: str = "idle"
 
-    _pose: str = "idle"
     _fist_since: float | None = None
     _was_fist: bool = False
     _fist_released_at: float | None = None
@@ -248,16 +247,33 @@ class GestureEngine:
     _swipe_cool_until: float = 0.0
     _swipe_lock_dir: int = 0
     _swipe_lock_until: float = 0.0
+    _pending_fire: str | None = None
 
     def _ready(self) -> bool:
         return time.monotonic() - self.last_action_at >= self.cooldown_sec
 
     def _fire(self, name: str, *, ignore_cooldown: bool = False) -> str | None:
+        """Propose an action. Caller must commit_fire() or reject_fire()."""
         if not ignore_cooldown and not self._ready():
             return None
-        self.last_action_at = time.monotonic()
         self.last_label = name
+        self._pending_fire = name
         return name
+
+    def commit_fire(self) -> None:
+        """Consume cooldown after dispatch actually ran the action."""
+        if self._pending_fire is not None:
+            if self._pending_fire == "app_expose":
+                self._three_latched = True
+                self._three_since = None
+            self.last_action_at = time.monotonic()
+            self._pending_fire = None
+
+    def reject_fire(self) -> None:
+        """Discard a proposed fire (profile disabled / dispatch failed early)."""
+        if self._pending_fire == "app_expose":
+            self._three_since = None
+        self._pending_fire = None
 
     def _reset_pinch(self) -> None:
         self._pinch_y0 = None
@@ -288,8 +304,13 @@ class GestureEngine:
         self._ok_latched = False
         self._three_since = None
         self._three_miss = 0
+        self._three_latched = False
         self._thumbs_since = None
-        if self.last_label.startswith(("volume", "pinch", "ok", "3", "👍", "SNAP")):
+        self._was_fist = False
+        self._fist_since = None
+        self._fist_released_at = None
+        self.reject_fire()
+        if self.last_label.startswith(("volume", "pinch", "ok", "3", "👍", "SNAP", "fist", "open")):
             self.last_label = "idle"
 
     def _commit_swipe(self, direction: int, now: float, *, palm_track: bool = False) -> None:
@@ -453,8 +474,11 @@ class GestureEngine:
                 not self._pinch_did_volume
                 and self._pinch_acc < 0.55
                 and held >= self.snap_hold_sec
+                and held <= self.snap_max_sec
             ):
                 self._pinch_snap_ready = True
+            elif held > self.snap_max_sec:
+                self._pinch_snap_ready = False
 
             if self._pinch_y0 is None:
                 self._pinch_y0 = self._pinch_y_smooth
@@ -494,25 +518,27 @@ class GestureEngine:
             self.last_label = "volume↑" if self._pinch_dir > 0 else "volume↓"
             if self._pinch_acc >= 1.0 and self._ready():
                 self._pinch_acc -= 1.0
-                self.last_action_at = now
                 self._mute_block_until = now + 0.7
                 self._pinch_did_volume = True
                 self._pinch_snap_ready = False
-                return "volume_up" if self._pinch_dir > 0 else "volume_down"
+                return self._fire("volume_up" if self._pinch_dir > 0 else "volume_down")
             return None
 
-        # Pinch ended: keep a tiny grace only mid-volume; else evaluate snap.
+        # Pinch ended: cancel snap if moving into OK (mute); else evaluate snap.
         if self._pinch_since is not None:
-            if (
+            if ok:
+                self._reset_pinch()
+            elif (
                 now < self._pinch_hold_until
                 and (self._pinch_did_volume or (self._pinch_armed and self._pinch_acc >= 0.45))
             ):
                 self.last_label = "volume"
                 return None
-            snap = self._finish_pinch_session(now)
-            if snap:
-                self.last_label = "screenshot"
-                return snap
+            else:
+                snap = self._finish_pinch_session(now)
+                if snap:
+                    self.last_label = "screenshot"
+                    return snap
 
         # OK → mute only after a short hold (avoids flash during pinch setup).
         if ok and now >= self._mute_block_until:
@@ -551,12 +577,10 @@ class GestureEngine:
             if held >= self.three_hold_sec:
                 fired = self._fire("app_expose")
                 if fired:
-                    self._three_latched = True
-                    self._three_since = None
+                    # Soft-block until commit/reject so we don't re-fire every frame.
+                    self._three_since = now + 999
                     self.last_label = "App Exposé"
-                    return fired
-                self.last_label = "3✋…"
-                return None
+                return fired
             self.last_label = f"3✋ {held:.1f}s"
             return None
 
@@ -597,19 +621,19 @@ class GestureEngine:
                 self.last_label = "return…"
                 return None
             if two and peak >= self.swipe_vx * 0.7:
-                self._commit_swipe(sign, now, palm_track=False)
-                if sign > 0:
-                    self.last_label = "space →"
-                    return self._fire("space_right")
-                self.last_label = "space ←"
-                return self._fire("space_left")
+                action = "space_right" if sign > 0 else "space_left"
+                fired = self._fire(action)
+                if fired:
+                    self._commit_swipe(sign, now, palm_track=False)
+                    self.last_label = "space →" if sign > 0 else "space ←"
+                return fired
             if palm and peak >= self.swipe_vx * 0.82:
-                self._commit_swipe(sign, now, palm_track=True)
-                if sign > 0:
-                    self.last_label = "next"
-                    return self._fire("next")
-                self.last_label = "prev"
-                return self._fire("prev")
+                action = "next" if sign > 0 else "prev"
+                fired = self._fire(action)
+                if fired:
+                    self._commit_swipe(sign, now, palm_track=True)
+                    self.last_label = "next" if sign > 0 else "prev"
+                return fired
 
         if palm:
             self.last_label = "palm"

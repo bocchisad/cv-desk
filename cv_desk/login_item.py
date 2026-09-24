@@ -31,8 +31,30 @@ def discover_launcher() -> Path | None:
     return None
 
 
+def _uid() -> int:
+    return os.getuid()
+
+
+def _domain_target() -> str:
+    return f"gui/{_uid()}/{LABEL}"
+
+
 def is_enabled() -> bool:
-    return PLIST_PATH.is_file()
+    """True only if launchctl knows the job (not merely that a plist file exists)."""
+    r = subprocess.run(
+        ["launchctl", "print", _domain_target()],
+        capture_output=True,
+        text=True,
+    )
+    return r.returncode == 0
+
+
+def _bootout() -> None:
+    subprocess.run(
+        ["launchctl", "bootout", f"gui/{_uid()}", str(PLIST_PATH)],
+        capture_output=True,
+    )
+    subprocess.run(["launchctl", "unload", str(PLIST_PATH)], capture_output=True)
 
 
 def enable(launcher: Path | None = None) -> tuple[bool, str]:
@@ -47,13 +69,15 @@ def enable(launcher: Path | None = None) -> tuple[bool, str]:
         "RunAtLoad": True,
         "KeepAlive": False,
         "ProcessType": "Interactive",
+        "StandardOutPath": str(Path.home() / "Library" / "Logs" / "CVDesk.login.out.log"),
+        "StandardErrorPath": str(Path.home() / "Library" / "Logs" / "CVDesk.login.err.log"),
     }
+    # Replace any prior job so re-enable is idempotent.
+    _bootout()
     with PLIST_PATH.open("wb") as f:
         plistlib.dump(data, f)
-    # Prefer bootstrap (modern) with fallback to load
-    uid = os.getuid()
     r = subprocess.run(
-        ["launchctl", "bootstrap", f"gui/{uid}", str(PLIST_PATH)],
+        ["launchctl", "bootstrap", f"gui/{_uid()}", str(PLIST_PATH)],
         capture_output=True,
         text=True,
     )
@@ -66,18 +90,23 @@ def enable(launcher: Path | None = None) -> tuple[bool, str]:
         )
         if r2.returncode != 0:
             err = (r.stderr or r2.stderr or r.stdout or r2.stdout or "launchctl failed").strip()
+            try:
+                PLIST_PATH.unlink()
+            except OSError:
+                pass
             return False, err[:120]
+    if not is_enabled():
+        try:
+            PLIST_PATH.unlink()
+        except OSError:
+            pass
+        return False, "login agent not loaded"
     return True, f"login: {path.name}"
 
 
 def disable() -> tuple[bool, str]:
-    uid = os.getuid()
+    _bootout()
     if PLIST_PATH.is_file():
-        subprocess.run(
-            ["launchctl", "bootout", f"gui/{uid}", str(PLIST_PATH)],
-            capture_output=True,
-        )
-        subprocess.run(["launchctl", "unload", str(PLIST_PATH)], capture_output=True)
         try:
             PLIST_PATH.unlink()
         except OSError as e:

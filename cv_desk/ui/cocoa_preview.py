@@ -24,7 +24,7 @@ class CocoaPreview:
             NSWindowStyleMaskResizable,
             NSWindowStyleMaskTitled,
         )
-        from Foundation import NSData  # type: ignore
+        from Foundation import NSData, NSNotificationCenter  # type: ignore
 
         self._NSImage = NSImage
         self._NSData = NSData
@@ -48,6 +48,23 @@ class CocoaPreview:
         self._view.setImageScaling_(NSImageScaleAxesIndependently)
         self._win.setContentView_(self._view)
         self._visible = False
+        # Red-close → callback (also polled as fallback).
+        self._obs = (
+            NSNotificationCenter.defaultCenter().addObserverForName_object_queue_usingBlock_(
+                "NSWindowWillCloseNotification",
+                self._win,
+                None,
+                lambda _note: self._handle_will_close(),
+            )
+        )
+
+    def _handle_will_close(self) -> None:
+        self._visible = False
+        if self._on_close:
+            try:
+                self._on_close()
+            except Exception:
+                pass
 
     def show(self) -> None:
         self._win.makeKeyAndOrderFront_(None)
@@ -80,8 +97,4 @@ class CocoaPreview:
 
     def close(self) -> None:
         self.hide()
-        if self._on_close:
-            try:
-                self._on_close()
-            except Exception:
-                pass
+        self._handle_will_close()

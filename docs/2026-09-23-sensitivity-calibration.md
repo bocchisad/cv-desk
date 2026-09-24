@@ -1,28 +1,27 @@
-# Sensitivity calibration — Design
+# Sensitivity calibration
 
-**Date:** 2026-09-23  
-**Status:** Approved (C: presets + wizard)
+**Date:** 2026-09-23 (synced 2026-09-24)  
+**Status:** Implemented
 
-## Presets (tray → Sensitivity)
+## Presets (`cv_desk/sensitivity.py`)
 
 | Preset | swipe_vx | pinch_vol_sensitivity | cooldown_sec |
 |--------|----------|----------------------|--------------|
-| Low    | 0.75     | 1.2                  | 0.70         |
-| Normal | 0.55     | 1.8                  | 0.55         |
-| High   | 0.35     | 2.6                  | 0.40         |
+| low | 0.55 | 1.6 | 0.55 |
+| normal | 0.38 | 2.4 | 0.40 |
+| high | 0.26 | 3.2 | 0.28 |
 
-Applied live to `GestureEngine` + saved to user `config.json`.  
-`sensitivity_preset` field tracks name; wizard sets it to `"custom"`.
+`config.default.json` matches **normal**.
 
-## Wizard (`python -m cv_desk --calibrate`)
+## Calibrate formulas (code)
 
-CLI OpenCV window (main thread). No macOS actions dispatched.
+- Swipe threshold: `clamp(0.45 * median(peaks), 0.18, 0.85)`
+- Pinch sensitivity: `clamp(target_steps / (median(travel) * 40), 0.8, 4.0)`
 
-1. **Swipe** — 3 open-palm horizontal bursts → `swipe_vx = clamp(0.65 * median(|vx_peak|), 0.2, 1.2)`
-2. **Pinch** — 2 vertical pinch travels → sensitivity so median travel ≈ 3.5 volume steps  
-   (`pinch_vol_sensitivity = clamp(3.5 / (travel * 40), 0.8, 4.0)`)
-3. **Save** (s / Enter) or **Cancel** (Esc). Space skips a phase (keeps current values).
+## CLI
 
-## Non-goals
+```bash
+PYTHONPATH=. python -m cv_desk --calibrate
+```
 
-Tray sliders, AppKit UI, fist/OK threshold calibration.
+Tray → Sensitivity → Calibrate… points at the same command.

@@ -38,18 +38,18 @@ def ensure_model() -> Path:
     print(f"Downloading hand model → {MODEL_PATH}")
     try:
         urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
-    except Exception:
-        import ssl
-
-        with urllib.request.urlopen(MODEL_URL, context=ssl._create_unverified_context()) as r, open(
-            MODEL_PATH, "wb"
-        ) as f:
-            f.write(r.read())
+    except Exception as e:
+        raise RuntimeError(
+            f"failed to download hand model (need network): {e}\n"
+            f"  place file manually at {MODEL_PATH}"
+        ) from e
+    if not MODEL_PATH.exists() or MODEL_PATH.stat().st_size < 1000:
+        raise RuntimeError(f"hand model missing or empty: {MODEL_PATH}")
     return MODEL_PATH
 
 
 def _avfoundation_devices() -> list[tuple[int, str]]:
-    """Load AVFoundation via pyobjc (no extra pip package) and list video devices."""
+    """List video devices. Index order matches OpenCV CAP_AVFOUNDATION when using devicesWithMediaType."""
     try:
         import objc
 
@@ -62,9 +62,10 @@ def _avfoundation_devices() -> list[tuple[int, str]]:
         AVCaptureDevice = ns.get("AVCaptureDevice")
         if AVCaptureDevice is None:
             return []
-        # AVMediaTypeVideo constant is @"vide"
-        devices = AVCaptureDevice.devicesWithMediaType_("vide") or []
+        # Prefer classic devicesWithMediaType — same ordering OpenCV typically uses.
+        devices = list(AVCaptureDevice.devicesWithMediaType_("vide") or [])
         if not devices:
+            # Fallback DiscoverySession; sort by uniqueID for stable indices.
             Discovery = ns.get("AVCaptureDeviceDiscoverySession")
             if Discovery is not None:
                 dtype_keys = (
@@ -81,7 +82,10 @@ def _avfoundation_devices() -> list[tuple[int, str]]:
                 sess = Discovery.discoverySessionWithDeviceTypes_mediaType_position_(
                     types, "vide", 0
                 )
-                devices = list(sess.devices() or [])
+                devices = sorted(
+                    list(sess.devices() or []),
+                    key=lambda d: str(d.uniqueID()),
+                )
         out: list[tuple[int, str]] = []
         for i, dev in enumerate(devices):
             name = str(dev.localizedName() or f"Camera {i}")
@@ -96,7 +100,6 @@ def list_camera_names() -> list[tuple[int, str]]:
     named = _avfoundation_devices()
     if named:
         return named
-    # Fallback: probe indices (no reliable names without camera TCC).
     found: list[tuple[int, str]] = []
     for i in range(6):
         cap = cv2.VideoCapture(i, cv2.CAP_AVFOUNDATION)
@@ -113,8 +116,6 @@ def resolve_camera_index(pref: int | str | None = "auto") -> tuple[int, str]:
     """
     Pick a camera index.
     Prefer MacBook FaceTime; skip Continuity / iPhone when names are available.
-    If names are missing but several indices open, prefer the highest index
-    (Continuity Camera usually grabs 0 when an iPhone is nearby).
     """
     cams = list_camera_names()
     if isinstance(pref, int) or (isinstance(pref, str) and str(pref).isdigit()):
@@ -131,8 +132,6 @@ def resolve_camera_index(pref: int | str | None = "auto") -> tuple[int, str]:
 
     non_phone = [(i, n) for i, n in cams if not _SKIP_NAME.search(n)]
     if non_phone:
-        # Prefer FaceTime-like names already handled; otherwise first non-phone.
-        # If all are generic "Camera N", Continuity often sits on 0 → pick last.
         if all(n.startswith("Camera ") for _, n in non_phone) and len(non_phone) > 1:
             return non_phone[-1]
         return non_phone[0]
@@ -164,10 +163,12 @@ class HandCameraThread(threading.Thread):
     def get(self) -> tuple[np.ndarray | None, list | None]:
         with self._lock:
             frame = None if self._frame is None else self._frame.copy()
-            lms = self._lms
+            lms = None if self._lms is None else list(self._lms)
         return frame, lms
 
     def run(self):
+        landmarker = None
+        cap = None
         try:
             model = ensure_model()
             opts = vision.HandLandmarkerOptions(
@@ -186,36 +187,49 @@ class HandCameraThread(threading.Thread):
             self.error = f"model: {e}"
             return
 
-        cap = cv2.VideoCapture(self.camera_index, cv2.CAP_AVFOUNDATION)
-        if not cap.isOpened():
-            cap = cv2.VideoCapture(self.camera_index)
-        if not cap.isOpened():
-            self.error = f"camera {self.camera_index} ({self.camera_name}) failed"
-            landmarker.close()
-            return
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        try:
+            cap = cv2.VideoCapture(self.camera_index, cv2.CAP_AVFOUNDATION)
+            if not cap.isOpened():
+                cap.release()
+                cap = cv2.VideoCapture(self.camera_index)
+            if not cap.isOpened():
+                self.error = f"camera {self.camera_index} ({self.camera_name}) failed"
+                return
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-        ts = 0
-        while not self._stop.is_set():
-            ok, frame = cap.read()
-            if not ok:
-                time.sleep(0.02)
-                continue
-            frame = cv2.flip(frame, 1)
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-            now = int(time.monotonic() * 1000)
-            if now <= ts:
-                now = ts + 1
-            ts = now
-            result = landmarker.detect_for_video(mp_image, ts)
-            lms = None
-            if result.hand_landmarks:
-                lms = _plain(result.hand_landmarks[0])
-            with self._lock:
-                self._frame = frame
-                self._lms = lms
-
-        cap.release()
-        landmarker.close()
+            ts = 0
+            while not self._stop.is_set():
+                ok, frame = cap.read()
+                if not ok:
+                    time.sleep(0.02)
+                    continue
+                frame = cv2.flip(frame, 1)
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                now = int(time.monotonic() * 1000)
+                if now <= ts:
+                    now = ts + 1
+                ts = now
+                try:
+                    result = landmarker.detect_for_video(mp_image, ts)
+                except Exception as e:
+                    self.error = f"detect: {e}"
+                    break
+                lms = None
+                if result.hand_landmarks:
+                    lms = _plain(result.hand_landmarks[0])
+                with self._lock:
+                    self._frame = frame
+                    self._lms = lms
+        finally:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+            if landmarker is not None:
+                try:
+                    landmarker.close()
+                except Exception:
+                    pass

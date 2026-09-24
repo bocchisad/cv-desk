@@ -11,7 +11,7 @@ import cv2
 from cv_desk import __version__
 from cv_desk.actions import macos as actions
 from cv_desk.config import load_config, save_config
-from cv_desk.frontmost import frontmost_app
+from cv_desk.frontmost import frontmost_app, is_self_app
 from cv_desk.login_item import disable as login_disable
 from cv_desk.login_item import enable as login_enable
 from cv_desk.login_item import is_enabled as login_is_enabled
@@ -34,15 +34,31 @@ from cv_desk.ui.preview import draw_preview
 from cv_desk.vision.camera import HandCameraThread, list_camera_names, resolve_camera_index
 from cv_desk.vision.gestures import GestureEngine
 
+# engine action id → config actions flag
+_ACTION_FLAG = {
+    "play_pause": "play_pause",
+    "next": "next_prev",
+    "prev": "next_prev",
+    "volume_up": "volume",
+    "volume_down": "volume",
+    "mute": "mute",
+    "mission_control": "mission_control",
+    "space_left": "spaces",
+    "space_right": "spaces",
+    "app_expose": "app_expose",
+    "screenshot": "screenshot",
+}
+
 
 class CVDeskApp:
     def __init__(self, camera_pref: int | str | None = None):
         self.cfg = load_config()
+        self._cfg_lock = threading.RLock()
         self.engine = GestureEngine(
-            cooldown_sec=float(self.cfg.get("cooldown_sec", 0.55)),
-            swipe_vx=float(self.cfg.get("swipe_vx", 0.55)),
-            pinch_vol_sensitivity=float(self.cfg.get("pinch_vol_sensitivity", 1.8)),
-            volume_step=int(self.cfg.get("volume_step", 4)),
+            cooldown_sec=float(self.cfg.get("cooldown_sec", 0.40)),
+            swipe_vx=float(self.cfg.get("swipe_vx", 0.38)),
+            pinch_vol_sensitivity=float(self.cfg.get("pinch_vol_sensitivity", 2.4)),
+            volume_step=int(self.cfg.get("volume_step", 2)),
             armed=bool(self.cfg.get("armed", True)),
         )
         pref = camera_pref if camera_pref is not None else self.cfg.get("camera_index", "auto")
@@ -59,15 +75,21 @@ class CVDeskApp:
         self._front_bundle = ""
         self._front_name = "default"
         self._front_at = 0.0
+        self._worker: threading.Thread | None = None
 
     def refresh_frontmost(self, *, force: bool = False) -> None:
+        """Sticky frontmost: ignore CV Desk / Python / Terminal so Profiles stay on the real app."""
         now = time.monotonic()
         if not force and now - self._front_at < 0.45:
             return
         self._front_at = now
         bid, name = frontmost_app()
-        self._front_bundle = bid
-        self._front_name = name or "default"
+        if bid and not is_self_app(bid, name):
+            self._front_bundle = bid
+            self._front_name = name or "default"
+        elif not self._front_bundle and bid:
+            # First sample is ourselves — keep empty until a real app appears.
+            pass
 
     def profile_label(self) -> str:
         name = self._front_name or "default"
@@ -76,12 +98,14 @@ class CVDeskApp:
         return name
 
     def _enabled(self, key: str) -> bool:
-        return profile_enabled(self.cfg, self._front_bundle, key)
+        with self._cfg_lock:
+            return profile_enabled(self.cfg, self._front_bundle, key)
 
     def apply_sensitivity(self, values: dict, preset: str) -> None:
-        self.cfg = apply_to_config(self.cfg, values, preset)
-        apply_to_engine(self.engine, values)
-        save_config(self.cfg)
+        with self._cfg_lock:
+            self.cfg = apply_to_config(self.cfg, values, preset)
+            apply_to_engine(self.engine, values)
+            save_config(self.cfg)
         self._status = f"sens: {preset}"
 
     def set_preset(self, name: str) -> None:
@@ -99,12 +123,16 @@ class CVDeskApp:
         was_running = self.cam.is_alive()
         self.cam.stop()
         if was_running:
-            self.cam.join(timeout=2.0)
+            self.cam.join(timeout=5.0)
+        if self.cam.is_alive():
+            self._status = "cam: restart stuck — quit & reopen"
+            return
         idx, name = resolve_camera_index(camera_pref)
         self.camera_index = idx
         self.camera_name = name
-        self.cfg["camera_index"] = idx
-        save_config(self.cfg)
+        with self._cfg_lock:
+            self.cfg["camera_index"] = idx
+            save_config(self.cfg)
         self.cam = HandCameraThread(idx, name)
         self.cam.start()
         self._status = f"cam: {name}"
@@ -114,39 +142,46 @@ class CVDeskApp:
             return
         self.refresh_frontmost()
         if action == "toggle_arm":
-            self.cfg["armed"] = self.engine.armed
-            save_config(self.cfg)
+            with self._cfg_lock:
+                self.cfg["armed"] = self.engine.armed
+                save_config(self.cfg)
             self._status = "ARMED" if self.engine.armed else "DISARMED"
             self._last_action_label = self._status
+            self.engine.commit_fire()
+            return
+
+        flag = _ACTION_FLAG.get(action)
+        if flag is not None and not self._enabled(flag):
+            self.engine.reject_fire()
+            self._status = f"off in {self._front_name}: {flag}"
             return
 
         mapping = {
-            "play_pause": ("play_pause", actions.play_pause),
-            "next": ("next_prev", actions.next_track),
-            "prev": ("next_prev", actions.prev_track),
-            "mute": ("mute", actions.mute_toggle),
-            "mission_control": ("mission_control", actions.mission_control),
-            "space_left": ("spaces", actions.space_left),
-            "space_right": ("spaces", actions.space_right),
-            "app_expose": ("app_expose", actions.app_expose),
-            "screenshot": ("screenshot", actions.screenshot),
+            "play_pause": actions.play_pause,
+            "next": actions.next_track,
+            "prev": actions.prev_track,
+            "mute": actions.mute_toggle,
+            "mission_control": actions.mission_control,
+            "space_left": actions.space_left,
+            "space_right": actions.space_right,
+            "app_expose": actions.app_expose,
+            "screenshot": actions.screenshot,
         }
 
         if action in ("volume_up", "volume_down"):
-            if not self._enabled("volume"):
-                return
             delta = self.engine.volume_step if action == "volume_up" else -self.engine.volume_step
             ok, msg = actions.volume_delta(delta)
+            self.engine.commit_fire()
             self._status = msg if ok else f"err: {msg}"
             self._last_action_label = self._status
             return
 
-        if action not in mapping:
-            return
-        flag, fn = mapping[action]
-        if not self._enabled(flag):
+        fn = mapping.get(action)
+        if fn is None:
+            self.engine.reject_fire()
             return
         ok, msg = fn()
+        self.engine.commit_fire()
         self._status = msg if ok else f"err: {msg}"
         self._last_action_label = self._status
 
@@ -205,6 +240,10 @@ class CVDeskApp:
     def quit(self):
         self._stop.set()
         self.cam.stop()
+        if self._worker is not None and self._worker.is_alive():
+            self._worker.join(timeout=2.0)
+        if self.cam.is_alive():
+            self.cam.join(timeout=3.0)
 
     def run_cli(self):
         """Preview window + console (no menu bar). HighGUI stays on the main thread."""
@@ -293,28 +332,42 @@ def run_tray():
                 self.quit_item,
             ]
             self.armed_item.state = bool(app_core.engine.armed)
-            self.preview_item.state = False
-            app_core._show_preview = False
+            want_preview = bool(app_core.cfg.get("preview", False))
+            self.preview_item.state = want_preview
+            app_core._show_preview = want_preview
+            if want_preview:
+                try:
+                    self._ensure_preview().show()
+                except Exception as e:
+                    app_core._status = f"preview err: {e}"
+                    app_core._show_preview = False
+                    self.preview_item.state = False
             self.login_item.state = login_is_enabled()
             self._sync_sens_checks()
             self._sync_profile_menu()
             app_core.cam.start()
-            self._worker = threading.Thread(
+            app_core._worker = threading.Thread(
                 target=lambda: app_core.loop_vision(opencv_preview=False),
                 daemon=True,
             )
-            self._worker.start()
+            app_core._worker.start()
+            self._worker = app_core._worker
 
         def _make_toggle_action(self, key: str):
             def _cb(_):
                 app_core.refresh_frontmost(force=True)
                 bid = app_core._front_bundle
                 if not bid:
-                    rumps.notification("CV Desk", "Profiles", "No frontmost app bundle id")
+                    rumps.notification(
+                        "CV Desk",
+                        "Profiles",
+                        "Focus the target app, then open Profiles again",
+                    )
                     return
-                cur = effective_actions(app_core.cfg, bid).get(key, True)
-                app_core.cfg = set_app_action(app_core.cfg, bid, key, not cur)
-                save_config(app_core.cfg)
+                with app_core._cfg_lock:
+                    cur = effective_actions(app_core.cfg, bid).get(key, True)
+                    app_core.cfg = set_app_action(app_core.cfg, bid, key, not cur)
+                    save_config(app_core.cfg)
                 self._sync_profile_menu()
                 label = ACTION_LABELS[key]
                 state = "ON" if not cur else "OFF"
@@ -349,8 +402,9 @@ def run_tray():
 
         def _preview_closed(self):
             app_core._show_preview = False
-            app_core.cfg["preview"] = False
-            save_config(app_core.cfg)
+            with app_core._cfg_lock:
+                app_core.cfg["preview"] = False
+                save_config(app_core.cfg)
             self.preview_item.state = False
 
         @rumps.timer(1.0)
@@ -384,15 +438,23 @@ def run_tray():
         def toggle_arm(self, sender):
             app_core.engine.armed = not app_core.engine.armed
             sender.state = bool(app_core.engine.armed)
-            app_core.cfg["armed"] = app_core.engine.armed
-            save_config(app_core.cfg)
+            with app_core._cfg_lock:
+                app_core.cfg["armed"] = app_core.engine.armed
+                save_config(app_core.cfg)
 
         def toggle_preview(self, sender):
             app_core._show_preview = not app_core._show_preview
             sender.state = bool(app_core._show_preview)
-            app_core.cfg["preview"] = app_core._show_preview
-            save_config(app_core.cfg)
-            win = self._ensure_preview()
+            with app_core._cfg_lock:
+                app_core.cfg["preview"] = app_core._show_preview
+                save_config(app_core.cfg)
+            try:
+                win = self._ensure_preview()
+            except Exception as e:
+                app_core._status = f"preview err: {e}"
+                app_core._show_preview = False
+                sender.state = False
+                return
             if app_core._show_preview:
                 win.show()
                 app_core._status = "preview on"
@@ -443,10 +505,11 @@ def run_tray():
             bid = app_core._front_bundle
             name = app_core._front_name
             if not bid:
-                rumps.notification("CV Desk", "Profiles", "No frontmost app")
+                rumps.notification("CV Desk", "Profiles", "Focus the target app first")
                 return
-            app_core.cfg = clear_app_profile(app_core.cfg, bid)
-            save_config(app_core.cfg)
+            with app_core._cfg_lock:
+                app_core.cfg = clear_app_profile(app_core.cfg, bid)
+                save_config(app_core.cfg)
             self._sync_profile_menu()
             app_core._status = f"{name}: default"
             rumps.notification("CV Desk", name, "Reset to global actions")

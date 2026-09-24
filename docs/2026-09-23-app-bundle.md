@@ -1,28 +1,21 @@
-# Phase A — .app + Launch at Login
+# macOS .app bundle
 
-**Date:** 2026-09-23  
-**Status:** Approved / implemented
+**Date:** 2026-09-23 (updated 2026-09-24)  
+**Status:** Dev-only wrapper
 
-## Bundle
+`scripts/build_app.sh` builds `dist/CV Desk.app` that:
 
-`scripts/build_app.sh` → `dist/CV Desk.app`
+1. Resolves the **cv_desk repo** as `../../..` from `Contents/MacOS` (so moving the whole tree works)
+2. Picks `$ROOT/.venv` or `$ROOT/../.venv` at **launch** (not bake-time absolute paths)
+3. Runs `python -m cv_desk`
 
-- `LSUIElement=1` (menu bar only)
-- `Contents/MacOS/CVDesk` bash launcher → repo `PYTHONPATH` + existing `.venv`
-- Does **not** copy venv into the bundle (dev-friendly)
+## Not redistributable
 
-## Launch at Login
+No frozen deps, no codesign/notarize, no bundled MediaPipe model. Privacy prompts usually attach to **Python**, not “CV Desk”.
 
-Tray → **Launch at Login** writes/removes  
-`~/Library/LaunchAgents/com.bocchisad.cvdesk.plist`  
-pointing at `CV Desk.app/Contents/MacOS/CVDesk`.
-
-## Usage
+## Rebuild after version bumps
 
 ```bash
 ./scripts/build_app.sh
 open "dist/CV Desk.app"
-# then CV menu → Launch at Login
 ```
-
-Grant **Accessibility** + **Camera** to **CV Desk** (or the underlying Python) in System Settings.

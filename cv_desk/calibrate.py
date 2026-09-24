@@ -52,10 +52,10 @@ def run_calibrate(camera_pref: int | str | None = None) -> int:
     idx, name = resolve_camera_index(pref)
     cam = HandCameraThread(idx, name)
     engine = GestureEngine(
-        cooldown_sec=float(cfg.get("cooldown_sec", 0.55)),
-        swipe_vx=float(cfg.get("swipe_vx", 0.55)),
-        pinch_vol_sensitivity=float(cfg.get("pinch_vol_sensitivity", 1.8)),
-        volume_step=int(cfg.get("volume_step", 4)),
+        cooldown_sec=float(cfg.get("cooldown_sec", 0.40)),
+        swipe_vx=float(cfg.get("swipe_vx", 0.38)),
+        pinch_vol_sensitivity=float(cfg.get("pinch_vol_sensitivity", 2.4)),
+        volume_step=int(cfg.get("volume_step", 2)),
         armed=True,
     )
     cam.start()
@@ -169,7 +169,7 @@ def run_calibrate(camera_pref: int | str | None = None) -> int:
                 values = {
                     "swipe_vx": float(new_swipe),
                     "pinch_vol_sensitivity": float(new_pinch),
-                    "cooldown_sec": float(cfg.get("cooldown_sec", 0.55)),
+                    "cooldown_sec": float(cfg.get("cooldown_sec", 0.40)),
                 }
                 cfg = apply_to_config(cfg, values, "custom")
                 save_config(cfg)

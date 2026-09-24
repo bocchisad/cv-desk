@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
 
 from cv_desk.sensitivity import (
     match_preset,
@@ -13,6 +15,11 @@ from cv_desk.sensitivity import (
 
 
 class SensitivityTests(unittest.TestCase):
+    def test_default_json_matches_normal_preset(self):
+        root = Path(__file__).resolve().parents[1]
+        cfg = json.loads((root / "config.default.json").read_text(encoding="utf-8"))
+        self.assertEqual(match_preset(cfg), "normal")
+
     def test_presets(self):
         n = preset_values("normal")
         self.assertAlmostEqual(n["swipe_vx"], 0.38)

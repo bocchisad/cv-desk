@@ -92,10 +92,16 @@ def next_track() -> tuple[bool, str]:
     if ok:
         return True, "next"
     for app in ("Spotify", "Music"):
-        ok2, _ = _osascript(f'try\n tell application "{app}" to next track\nend try')
-        if ok2:
+        ok2, out = _osascript(
+            f'if application "{app}" is running then\n'
+            f'  tell application "{app}" to next track\n'
+            f'  return "ok"\n'
+            f'end if\n'
+            f'return "no"'
+        )
+        if ok2 and out.strip() == "ok":
             return True, f"next ({app})"
-    return ok, msg
+    return False, msg or "next failed"
 
 
 def prev_track() -> tuple[bool, str]:
@@ -103,20 +109,26 @@ def prev_track() -> tuple[bool, str]:
     if ok:
         return True, "previous"
     for app in ("Spotify", "Music"):
-        ok2, _ = _osascript(f'try\n tell application "{app}" to previous track\nend try')
-        if ok2:
+        ok2, out = _osascript(
+            f'if application "{app}" is running then\n'
+            f'  tell application "{app}" to previous track\n'
+            f'  return "ok"\n'
+            f'end if\n'
+            f'return "no"'
+        )
+        if ok2 and out.strip() == "ok":
             return True, f"previous ({app})"
-    return ok, msg
+    return False, msg or "previous failed"
 
 
-def get_volume() -> int:
+def get_volume() -> int | None:
     ok, out = _osascript("output volume of (get volume settings)")
     if not ok:
-        return 50
+        return None
     try:
         return int(float(out))
     except ValueError:
-        return 50
+        return None
 
 
 def set_volume(level: int) -> tuple[bool, str]:
@@ -126,7 +138,10 @@ def set_volume(level: int) -> tuple[bool, str]:
 
 
 def volume_delta(delta: int) -> tuple[bool, str]:
-    return set_volume(get_volume() + delta)
+    cur = get_volume()
+    if cur is None:
+        return False, "volume read failed (Accessibility?)"
+    return set_volume(cur + delta)
 
 
 def mute_toggle() -> tuple[bool, str]:
@@ -186,6 +201,10 @@ def screenshot() -> tuple[bool, str]:
     desktop.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y-%m-%d at %H.%M.%S")
     path = desktop / f"Screenshot {stamp}.png"
+    n = 1
+    while path.exists():
+        path = desktop / f"Screenshot {stamp}-{n}.png"
+        n += 1
 
     try:
         from Foundation import NSURL  # type: ignore

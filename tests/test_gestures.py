@@ -212,6 +212,7 @@ class GestureHelpers(unittest.TestCase):
         self.assertIsNone(eng.update(three))
         eng._three_since = time.monotonic() - 0.2
         self.assertEqual(eng.update(three), "app_expose")
+        eng.commit_fire()
         # Still holding — latched, no double fire
         self.assertIsNone(eng.update(three))
 
@@ -295,6 +296,49 @@ class GestureHelpers(unittest.TestCase):
         self.assertEqual(sig2[1], -1)
         self.assertEqual(eng._swipe_lock_dir, 1)
         self.assertLess(now0 + 0.40, eng._swipe_lock_until)
+
+    def test_hand_lost_clears_fist_intent(self):
+        eng = GestureEngine(cooldown_sec=0.0)
+        fist = _lms({
+            4: (0.32, 0.58),
+            8: (0.48, 0.60),
+            6: (0.48, 0.52),
+            12: (0.50, 0.60),
+            10: (0.50, 0.52),
+            16: (0.52, 0.60),
+            14: (0.52, 0.52),
+            20: (0.54, 0.60),
+            18: (0.54, 0.52),
+            0: (0.50, 0.78),
+            9: (0.50, 0.55),
+        })
+        palm = _lms({
+            8: (0.35, 0.25),
+            6: (0.38, 0.4),
+            12: (0.45, 0.22),
+            10: (0.47, 0.4),
+            16: (0.55, 0.24),
+            14: (0.55, 0.4),
+            20: (0.68, 0.28),
+            18: (0.62, 0.4),
+            4: (0.30, 0.40),
+            5: (0.4, 0.45),
+            9: (0.5, 0.45),
+            0: (0.5, 0.75),
+        })
+        self.assertIsNone(eng.update(fist))
+        self.assertTrue(eng._was_fist)
+        eng.on_hand_lost()
+        self.assertFalse(eng._was_fist)
+        self.assertIsNone(eng.update(palm))  # must NOT play/pause after lost hand
+
+    def test_reject_fire_does_not_consume_cooldown(self):
+        eng = GestureEngine(cooldown_sec=1.0)
+        self.assertEqual(eng._fire("screenshot"), "screenshot")
+        eng.reject_fire()
+        self.assertEqual(eng._fire("mute"), "mute")
+        eng.commit_fire()
+        self.assertIsNone(eng._fire("play_pause"))  # cooldown active
 
 
 if __name__ == "__main__":

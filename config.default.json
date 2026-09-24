@@ -6,7 +6,7 @@
   "cooldown_sec": 0.40,
   "volume_step": 2,
   "swipe_vx": 0.38,
-  "pinch_vol_sensitivity": 2.0,
+  "pinch_vol_sensitivity": 2.4,
   "actions": {
     "play_pause": true,
     "next_prev": true,
