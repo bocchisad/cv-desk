@@ -3,29 +3,20 @@
 **Date:** 2026-09-24  
 **Status:** Implemented
 
-Frontmost app (`NSWorkspace`) selects optional action overrides. Sensitivity stays global.
+Same gestures everywhere. Frontmost app can only **enable/disable** action groups.
 
 ## Config
 
 ```json
-"actions": { "volume": true, "spaces": true, "...": true },
+"actions": { "volume": true, "spaces": true },
 "profiles": {
   "com.spotify.client": { "spaces": false, "screenshot": false },
-  "com.apple.Safari": { "volume": false, "next_prev": false }
+  "dev.cursor": { "spaces": false, "app_expose": false }
 }
 ```
 
-Merge: `effective = actions ⊕ profiles[bundle_id]` (overrides win).
-
 ## Tray
 
-**Profiles** menu:
-- Shows current frontmost app (`Name*` if a profile exists)
-- Checkable action toggles write overrides for that app
-- **Reset this app to default** clears its profile
+**Profiles** — checkboxes for the frontmost app + **Reset this app to default**.
 
-Preview HUD: `app: Spotify*`
-
-## Non-goals (v1)
-
-Per-app sensitivity, gesture remapping, automatic profiles.
+Preview HUD: `app: Cursor*`.

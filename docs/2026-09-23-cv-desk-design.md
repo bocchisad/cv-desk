@@ -21,7 +21,7 @@
 
 ## Per-app profiles (Phase D)
 
-Frontmost app can override action on/off only (no sensitivity). Tray → **Profiles**.
+Frontmost app can override action on/off only (no remap / sensitivity). Tray → **Profiles**.
 
 ## Non-goals v1
 

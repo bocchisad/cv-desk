@@ -212,7 +212,7 @@ class CVDeskApp:
         print(f"Camera [{self.camera_index}]: {self.camera_name}")
         print("Pinch hold still → SNAP ✓ → open = screenshot | pinch↕ = volume")
         print("3-finger hold = App Exposé | 2-finger swipe = Spaces | 👍 = Mission Control")
-        print("Per-app: tray Profiles menu toggles actions for the frontmost app")
+        print("Per-app: tray Profiles — enable/disable gestures for the frontmost app")
         print("Privacy: Accessibility + Screen Recording → Terminal / CV Desk.app")
         self.cam.start()
         try:

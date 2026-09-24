@@ -28,6 +28,19 @@ class ProfileMerge(unittest.TestCase):
         self.assertTrue(is_enabled(cfg, "com.spotify.client", "volume"))
         self.assertTrue(is_enabled(cfg, "com.apple.Safari", "spaces"))
 
+    def test_nested_actions_from_remap_era(self):
+        cfg = {
+            "actions": {"mute": True, "screenshot": True},
+            "profiles": {
+                "x.app": {
+                    "actions": {"mute": False},
+                    "remap": {"screenshot": "mute"},
+                }
+            },
+        }
+        self.assertFalse(is_enabled(cfg, "x.app", "mute"))
+        self.assertTrue(is_enabled(cfg, "x.app", "screenshot"))
+
     def test_set_and_clear(self):
         cfg = {"actions": {"volume": True}, "profiles": {}}
         cfg = set_app_action(cfg, "com.spotify.client", "volume", False)
