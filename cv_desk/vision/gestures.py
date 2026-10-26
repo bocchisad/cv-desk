@@ -477,14 +477,18 @@ class GestureEngine:
         # --- Closed hand: arm-toggle + play/pause intent ---
         if closed and not opening:
             if fist:
-                self._fist_strict_seen = True
-                if self._fist_since is None:
+                # First strict-fist frame starts the arm clock (loose time does not count).
+                if not self._fist_strict_seen:
+                    self._fist_since = now
+                    self._fist_strict_seen = True
+                elif self._fist_since is None:
                     self._fist_since = now
             elif self._fist_strict_seen and _index_curled(lms):
                 # Noise frame during an already-started strict fist — keep timer.
                 pass
             else:
                 # Loose closed without a real fist start — play/pause only, no arm.
+                self._fist_strict_seen = False
                 if self._fist_since is None:
                     self._fist_since = now
                 held_loose = now - self._fist_since

@@ -813,10 +813,118 @@ class CameraDetectRecovery(unittest.TestCase):
             time.sleep(0.02)
         cam.stop()
         cam.join(timeout=2.0)
-        self.assertTrue(cam.is_alive() is False or not cam.is_alive())
+        self.assertFalse(cam.is_alive())
         self.assertTrue(saw_error)
         self.assertTrue(cleared)
         self.assertGreaterEqual(created["n"], 2)
+
+
+class HandCameraThreadJoin(unittest.TestCase):
+    """Thread._stop must not be shadowed — join() must work on 3.11+."""
+
+    def test_start_stop_join(self):
+        cam = camera_mod.HandCameraThread(0, "join-test")
+
+        class FakeCap:
+            def isOpened(self):
+                return True
+
+            def read(self):
+                time.sleep(0.02)
+                return True, np.zeros((24, 32, 3), dtype=np.uint8)
+
+            def set(self, *_a):
+                return True
+
+            def release(self):
+                pass
+
+        class FakeLM:
+            def detect_for_video(self, *_a, **_k):
+                return SimpleNamespace(hand_landmarks=[])
+
+            def close(self):
+                pass
+
+        cam._create_landmarker = lambda: FakeLM()  # type: ignore[method-assign]
+        cam._open_capture = lambda: FakeCap()  # type: ignore[method-assign]
+        # Ensure we did not shadow Thread._stop with an Event.
+        self.assertIsInstance(cam._stop_evt, threading.Event)
+        self.assertFalse(isinstance(getattr(cam, "_stop", None), threading.Event))
+
+        cam.start()
+        time.sleep(0.05)
+        cam.stop()
+        cam.join(timeout=2.0)
+        self.assertFalse(cam.is_alive())
+
+
+class FistHoldDoesNotCountLooseTime(unittest.TestCase):
+    """Loose closed time must not count toward arm; only strict fist hold does."""
+
+    def test_loose_then_one_fist_frame_no_arm(self):
+        eng = GestureEngine(cooldown_sec=0.0, arm_hold_sec=1.15)
+        half = _lms({
+            8: (0.48, 0.58),
+            6: (0.48, 0.52),
+            5: (0.48, 0.55),
+            12: (0.45, 0.22),
+            10: (0.47, 0.40),
+            16: (0.55, 0.24),
+            14: (0.55, 0.40),
+            20: (0.68, 0.28),
+            18: (0.62, 0.40),
+            4: (0.32, 0.50),
+            2: (0.38, 0.55),
+            0: (0.50, 0.78),
+            9: (0.50, 0.45),
+            13: (0.55, 0.45),
+            17: (0.62, 0.45),
+        })
+        fist = _fist()
+        self.assertFalse(is_fist(half))
+        self.assertTrue(is_fist(fist))
+        eng.update(half)
+        eng._fist_since = time.monotonic() - 1.2
+        self.assertIsNone(eng.update(half))
+        # First strict fist frame resets the clock — no instant arm.
+        self.assertIsNone(eng.update(fist))
+        self.assertTrue(eng._fist_strict_seen)
+
+    def test_strict_fist_hold_arms(self):
+        eng = GestureEngine(cooldown_sec=0.0, arm_hold_sec=1.15)
+        fist = _fist()
+        eng.update(fist)
+        eng._fist_since = time.monotonic() - 1.2
+        self.assertEqual(eng.update(fist), "toggle_arm")
+
+
+class ModelBackupOnReplace(unittest.TestCase):
+    """Mismatched on-disk model is backed up before network replace."""
+
+    def test_backup_before_replace(self):
+        payload = b"x" * 2000
+        good_hash = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as td:
+            model = Path(td) / "hand_landmarker.task"
+            old = b"manual-old-" + b"z" * 2000
+            model.write_bytes(old)
+
+            def fake_retrieve(_url, filename):
+                Path(filename).write_bytes(payload)
+
+            with mock.patch.object(camera_mod, "MODEL_PATH", model):
+                with mock.patch.object(camera_mod, "MODEL_SHA256", good_hash):
+                    with mock.patch.dict(os.environ, {}, clear=False):
+                        os.environ.pop("CVDESK_HAND_MODEL", None)
+                        with mock.patch.object(
+                            camera_mod.urllib.request, "urlretrieve", side_effect=fake_retrieve
+                        ):
+                            camera_mod.ensure_model()
+            bak = Path(str(model) + ".bak")
+            self.assertTrue(bak.is_file())
+            self.assertEqual(bak.read_bytes(), old)
+            self.assertEqual(model.read_bytes(), payload)
 
 
 if __name__ == "__main__":

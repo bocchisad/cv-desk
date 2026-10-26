@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 import urllib.error
@@ -111,6 +112,17 @@ def ensure_model() -> Path:
         raise RuntimeError(
             f"hand model missing, empty, or hash mismatch after download: {MODEL_PATH}"
         )
+    # Preserve a manually placed / mismatched cache before overwrite.
+    if MODEL_PATH.exists():
+        bak = Path(str(MODEL_PATH) + ".bak")
+        try:
+            shutil.copy2(MODEL_PATH, bak)
+            log.warning(
+                "hash mismatch — backed up previous model to %s before replace",
+                bak,
+            )
+        except OSError as e:
+            log.warning("could not backup previous model (%s); replacing anyway", e)
     os.replace(tmp, MODEL_PATH)
     return MODEL_PATH
 
@@ -226,7 +238,8 @@ class HandCameraThread(threading.Thread):
         super().__init__(daemon=True, name="CVDeskCam")
         self.camera_index = camera_index
         self.camera_name = camera_name or f"Camera {camera_index}"
-        self._stop = threading.Event()
+        # Must not shadow threading.Thread._stop (join() calls it on 3.11+).
+        self._stop_evt = threading.Event()
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
         self._frame: np.ndarray | None = None
@@ -235,7 +248,7 @@ class HandCameraThread(threading.Thread):
         self.error: str | None = None
 
     def stop(self):
-        self._stop.set()
+        self._stop_evt.set()
         with self._cond:
             self._cond.notify_all()
 
@@ -289,7 +302,8 @@ class HandCameraThread(threading.Thread):
     def run(self):
         """Capture loop: never exit until stop(); reopen/recreate on errors with backoff."""
         backoff = 0.5
-        while not self._stop.is_set():
+        last_setup_err: str | None = None
+        while not self._stop_evt.is_set():
             landmarker = None
             cap = None
             try:
@@ -297,23 +311,35 @@ class HandCameraThread(threading.Thread):
                     landmarker = self._create_landmarker()
                 except Exception as e:
                     self.error = f"model: {e}"
-                    log.exception("hand model / landmarker failed")
+                    err_key = str(e)
+                    if err_key != last_setup_err:
+                        log.error(
+                            "hand model unavailable: %s — will retry (backoff up to 5 min)",
+                            e,
+                        )
+                        last_setup_err = err_key
                     time.sleep(backoff)
-                    backoff = min(backoff * 2.0, 8.0)
+                    backoff = min(backoff * 2.0, 300.0)
                     continue
 
                 cap = self._open_capture()
                 if not cap.isOpened():
                     self.error = f"camera {self.camera_index} ({self.camera_name}) failed"
-                    log.error("%s — retrying (backoff %.1fs)", self.error, backoff)
+                    if self.error != last_setup_err:
+                        log.error(
+                            "%s — retrying (backoff up to 5 min)",
+                            self.error,
+                        )
+                        last_setup_err = self.error
                     time.sleep(backoff)
-                    backoff = min(backoff * 2.0, 8.0)
+                    backoff = min(backoff * 2.0, 300.0)
                     continue
 
+                last_setup_err = None
                 ts = 0
                 last_ok = time.monotonic()
                 session_backoff = 0.5
-                while not self._stop.is_set():
+                while not self._stop_evt.is_set():
                     try:
                         ok, frame = cap.read()
                         if not ok:
@@ -378,7 +404,7 @@ class HandCameraThread(threading.Thread):
                     except (RuntimeError, AttributeError):
                         pass
 
-            if self._stop.is_set():
+            if self._stop_evt.is_set():
                 break
             time.sleep(backoff)
-            backoff = min(backoff * 2.0, 8.0)
+            backoff = min(backoff * 2.0, 300.0)
