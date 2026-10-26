@@ -18,6 +18,7 @@ from cv_desk.frontmost import is_self_app
 from cv_desk.vision import camera as camera_mod
 from cv_desk.vision.gestures import (
     GestureEngine,
+    is_closed_hand,
     is_fist,
     is_ok,
     is_open_palm,
@@ -336,6 +337,100 @@ class SidewaysPalm(unittest.TestCase):
 
 class GestureDisambiguation(unittest.TestCase):
     """Live-camera regressions: palm≠exposé, pinch≠mute, snap stays ready."""
+
+    def test_fist_with_thumb_tucked_is_not_pinch(self):
+        """Common fist (thumb across fingers) must arm, not steal snap/pinch."""
+        fist = _lms({
+            4: (0.48, 0.58),  # thumb tucked near index
+            8: (0.48, 0.60),
+            6: (0.48, 0.52),
+            12: (0.50, 0.60),
+            10: (0.50, 0.52),
+            16: (0.52, 0.60),
+            14: (0.52, 0.52),
+            20: (0.54, 0.60),
+            18: (0.54, 0.52),
+            5: (0.48, 0.55),
+            13: (0.52, 0.55),
+            17: (0.54, 0.55),
+            2: (0.44, 0.58),
+            0: (0.50, 0.78),
+            9: (0.50, 0.55),
+        })
+        self.assertTrue(is_fist(fist))
+        self.assertFalse(is_pinch(fist))
+
+    def test_open_c_is_not_fist(self):
+        """Released pinch (thumb+index out, others curled) must not stick as fist."""
+        open_c = _lms({
+            4: (0.32, 0.38),  # thumb out
+            2: (0.40, 0.48),
+            8: (0.68, 0.36),  # index stretched
+            6: (0.55, 0.42),
+            5: (0.45, 0.50),
+            12: (0.50, 0.60),
+            10: (0.50, 0.52),
+            16: (0.52, 0.60),
+            14: (0.52, 0.52),
+            20: (0.54, 0.60),
+            18: (0.54, 0.52),
+            13: (0.52, 0.55),
+            17: (0.54, 0.55),
+            0: (0.50, 0.78),
+            9: (0.50, 0.55),
+        })
+        self.assertFalse(is_closed_hand(open_c))
+        self.assertFalse(is_fist(open_c))
+
+    def test_closed_hold_arms(self):
+        """Sustained closed fist must fire toggle_arm (not hang on fist Ns)."""
+        eng = GestureEngine(cooldown_sec=0.0, arm_hold_sec=0.05)
+        fist = _fist()
+        self.assertTrue(is_closed_hand(fist))
+        eng.update(fist)
+        eng._fist_since = time.monotonic() - 0.2
+        self.assertEqual(eng.update(fist), "toggle_arm")
+
+    def test_snap_does_not_fire_on_ok_fingers(self):
+        """Raising middle/ring/pinky while tips stay pinched must not screenshot."""
+        eng = GestureEngine(
+            cooldown_sec=0.0,
+            pinch_arm_sec=0.05,
+            snap_hold_sec=0.05,
+            pinch_deadzone=0.05,
+        )
+        pinch = _lms({
+            4: (0.48, 0.40),
+            8: (0.50, 0.40),
+            6: (0.50, 0.48),
+            12: (0.52, 0.55),
+            10: (0.52, 0.48),
+            16: (0.55, 0.55),
+            14: (0.55, 0.48),
+            20: (0.58, 0.55),
+            18: (0.58, 0.48),
+            0: (0.5, 0.70),
+            9: (0.5, 0.50),
+        })
+        # OK-ish: tips still close, other three up
+        okish = _lms({
+            4: (0.48, 0.40),
+            8: (0.50, 0.40),
+            6: (0.50, 0.48),
+            12: (0.50, 0.22),
+            10: (0.50, 0.40),
+            16: (0.55, 0.24),
+            14: (0.55, 0.40),
+            20: (0.60, 0.26),
+            18: (0.60, 0.40),
+            0: (0.5, 0.70),
+            9: (0.5, 0.45),
+        })
+        eng.update(pinch)
+        eng._pinch_since = time.monotonic() - 0.2
+        eng._pinch_armed = True
+        eng._pinch_snap_ready = True
+        self.assertNotEqual(eng.update(okish), "screenshot")
 
     def test_open_palm_is_not_three_finger(self):
         palm = _open_palm()
