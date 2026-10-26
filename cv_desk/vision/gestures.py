@@ -41,33 +41,43 @@ def hand_size(lms) -> float:
     return max(_d(lms[WRIST], lms[MIDDLE_MCP]), 1e-3)
 
 
+# Pinch ends / release uses the same gap threshold (no dead zone that cancels snap).
+PINCH_GAP_END = 0.34
+
+
 def finger_up(lms, tip: int, pip: int) -> bool:
-    """True if finger is extended (tip far from MCP and/or above PIP)."""
+    """True if finger is extended — rotation-tolerant (no screen-axis assumption)."""
     hs = hand_size(lms)
-    mcp = _TIP_MCP.get(tip)
-    if mcp is not None and _d(lms[tip], lms[mcp]) / hs > 0.55:
+    mcp = _TIP_MCP.get(tip, pip)
+    tip_w = _d(lms[tip], lms[WRIST])
+    pip_w = _d(lms[pip], lms[WRIST])
+    # Tip farther from wrist than PIP, by a fraction of palm size.
+    if tip_w > pip_w + 0.12 * hs:
         return True
-    # Soft margin — webcam angle often flattens tips vs PIP.
-    if lms[tip].y < lms[pip].y - 0.012:
+    # Tip clearly away from its MCP.
+    if _d(lms[tip], lms[mcp]) / hs > 0.55:
         return True
     return False
 
 
 def finger_folded(lms, tip: int, pip: int) -> bool:
-    """True if finger is curled (not extended)."""
+    """True if finger is curled — rotation-tolerant."""
     if finger_up(lms, tip, pip):
         return False
     hs = hand_size(lms)
-    mcp = _TIP_MCP.get(tip)
-    if mcp is not None and _d(lms[tip], lms[mcp]) / hs < 0.45:
+    mcp = _TIP_MCP.get(tip, pip)
+    if _d(lms[tip], lms[mcp]) / hs < 0.45:
         return True
-    return lms[tip].y > lms[pip].y - 0.012
+    tip_w = _d(lms[tip], lms[WRIST])
+    pip_w = _d(lms[pip], lms[WRIST])
+    return tip_w <= pip_w + 0.06 * hs
 
 
 def _index_curled(lms) -> bool:
     """Index tip near its knuckle — false for open-pinch / pointing."""
     hs = hand_size(lms)
     return _d(lms[INDEX_TIP], lms[INDEX_MCP]) / hs < 0.50
+
 
 def _folded_count(lms) -> int:
     return sum(
@@ -102,7 +112,6 @@ def is_closed_hand(lms) -> bool:
     # Open C / released pinch: index stretched out — never a fist.
     if not _index_curled(lms):
         return False
-    hs = hand_size(lms)
     # Floating tip-pinch (away from palm) is volume/snap — not a fist.
     # Thumb tucked across a fist (near palm) still counts as closed.
     # Thumb held aside on a real fist (wide gap + curled index) stays closed.
@@ -114,7 +123,7 @@ def is_closed_hand(lms) -> bool:
 
 
 def is_fist(lms) -> bool:
-    """Closed fist for arm/disarm hold (thumb may tuck across the fingers)."""
+    """Strict closed fist for arm/disarm: all four fingers curled, thumb not extended."""
     if not is_closed_hand(lms):
         return False
     if not _index_curled(lms):
@@ -125,15 +134,17 @@ def is_fist(lms) -> bool:
         (RING_TIP, RING_PIP),
         (PINKY_TIP, PINKY_PIP),
     )
-    # Allow one finger flicker from webcam noise; need 3+ firmly folded.
-    if sum(1 for t, p in pairs if finger_folded(lms, t, p)) < 3:
+    if not all(finger_folded(lms, t, p) for t, p in pairs):
         return False
     hs = hand_size(lms)
     if is_thumbs_up(lms):
         return False
     # Tips clustered near the palm (real fists from an angle are a bit looser).
-    far = sum(1 for tip in (INDEX_TIP, MIDDLE_TIP, RING_TIP, PINKY_TIP)
-              if _d(lms[tip], lms[MIDDLE_MCP]) / hs > 0.62)
+    far = sum(
+        1
+        for tip in (INDEX_TIP, MIDDLE_TIP, RING_TIP, PINKY_TIP)
+        if _d(lms[tip], lms[MIDDLE_MCP]) / hs > 0.62
+    )
     if far >= 2:
         return False
     return True
@@ -155,20 +166,20 @@ def is_open_palm(lms) -> bool:
 
 
 def is_ok(lms) -> bool:
-    """👌 — thumb↔index ring with middle/ring/pinky clearly UP (not a casual pinch)."""
+    """👌 — thumb↔index ring with middle/ring/pinky clearly extended (not a casual pinch)."""
     hs = hand_size(lms)
     near = _d(lms[THUMB_TIP], lms[INDEX_TIP]) / hs < 0.25
     if not near:
         return False
-    # Require clear vertical extension (stricter than finger_up) so a volume
-    # pinch with slightly raised fingers does not become mute.
-    def _clearly_up(tip: int, pip: int) -> bool:
-        return lms[tip].y < lms[pip].y - 0.028
+
+    # Stricter than finger_up so a volume pinch with slightly raised fingers ≠ mute.
+    def _clearly_extended(tip: int, pip: int) -> bool:
+        return _d(lms[tip], lms[WRIST]) > _d(lms[pip], lms[WRIST]) + 0.18 * hs
 
     return (
-        _clearly_up(MIDDLE_TIP, MIDDLE_PIP)
-        and _clearly_up(RING_TIP, RING_PIP)
-        and _clearly_up(PINKY_TIP, PINKY_PIP)
+        _clearly_extended(MIDDLE_TIP, MIDDLE_PIP)
+        and _clearly_extended(RING_TIP, RING_PIP)
+        and _clearly_extended(PINKY_TIP, PINKY_PIP)
     )
 
 
@@ -179,7 +190,7 @@ def is_pinch(lms) -> bool:
     """
     pin = _pinch_gap(lms)
     # Tight enough that opening the hand clearly ends the session (snap/volume).
-    if pin > 0.34:
+    if pin > PINCH_GAP_END:
         return False
     # OK (three fingers up) is mute — don't treat as volume.
     if is_ok(lms):
@@ -208,7 +219,10 @@ def fingers_opening(lms) -> bool:
 
 
 def is_thumbs_up(lms) -> bool:
-    """👍 — thumb extended upward, other four fingers folded."""
+    """👍 — thumb extended along the palm axis; other four fingers folded.
+
+    Uses wrist→middle-MCP as the palm axis (rotation-tolerant), not screen Y.
+    """
     folded = all(
         finger_folded(lms, t, p)
         for t, p in (
@@ -221,15 +235,22 @@ def is_thumbs_up(lms) -> bool:
     if not folded:
         return False
     hs = hand_size(lms)
-    # Tip clearly above thumb MCP / palm (image y shrinks upward).
-    if lms[THUMB_TIP].y > lms[THUMB_MCP].y - 0.035:
-        return False
-    if lms[THUMB_TIP].y > lms[MIDDLE_MCP].y - 0.02:
-        return False
     if _d(lms[THUMB_TIP], lms[THUMB_MCP]) / hs < 0.22:
         return False
     # Not a pinch / OK (thumb glued to index).
     if _d(lms[THUMB_TIP], lms[INDEX_TIP]) / hs < 0.28:
+        return False
+    # Palm axis (wrist → middle MCP). Thumbs-up: tip projects further along
+    # that axis than thumb MCP (extended past the knuckle toward/beyond fingers).
+    ax = lms[MIDDLE_MCP].x - lms[WRIST].x
+    ay = lms[MIDDLE_MCP].y - lms[WRIST].y
+    n = math.hypot(ax, ay) or 1e-3
+    ux, uy = ax / n, ay / n
+    tip_along = (lms[THUMB_TIP].x - lms[WRIST].x) * ux + (lms[THUMB_TIP].y - lms[WRIST].y) * uy
+    mcp_along = (lms[THUMB_MCP].x - lms[WRIST].x) * ux + (lms[THUMB_MCP].y - lms[WRIST].y) * uy
+    if tip_along < mcp_along + 0.08 * hs:
+        return False
+    if _d(lms[THUMB_TIP], lms[WRIST]) <= _d(lms[THUMB_MCP], lms[WRIST]) + 0.05 * hs:
         return False
     return True
 
@@ -284,7 +305,7 @@ class GestureEngine:
     thumbs_hold_sec: float = 0.70
     three_hold_sec: float = 0.55
     snap_hold_sec: float = 0.45  # still pinch until HUD shows SNAP ✓, then open
-    snap_max_sec: float = 2.5
+    snap_max_sec: float = 1.5  # hold longer than this → release does not screenshot
 
     armed: bool = True
     last_action_at: float = 0.0
@@ -294,6 +315,7 @@ class GestureEngine:
     _was_fist: bool = False
     _fist_released_at: float | None = None
     _arm_latched: bool = False  # after toggle_arm, suppress play_pause until fist released
+    _fist_strict_seen: bool = False  # real is_fist seen this hold (for arm)
     _thumbs_since: float | None = None
     _three_since: float | None = None
     _three_miss: int = 0
@@ -379,6 +401,7 @@ class GestureEngine:
         self._fist_since = None
         self._fist_released_at = None
         self._arm_latched = False
+        self._fist_strict_seen = False
         self.reject_fire()
         if self.last_label.startswith(("volume", "pinch", "ok", "3", "👍", "SNAP", "fist", "open")):
             self.last_label = "idle"
@@ -449,24 +472,43 @@ class GestureEngine:
             self._was_fist = False
             self._fist_since = None
             self._fist_released_at = None
+            self._fist_strict_seen = False
 
         # --- Closed hand: arm-toggle + play/pause intent ---
         if closed and not opening:
-            if self._fist_since is None:
-                self._fist_since = now
-            held = now - self._fist_since
+            if fist:
+                self._fist_strict_seen = True
+                if self._fist_since is None:
+                    self._fist_since = now
+            elif self._fist_strict_seen and _index_curled(lms):
+                # Noise frame during an already-started strict fist — keep timer.
+                pass
+            else:
+                # Loose closed without a real fist start — play/pause only, no arm.
+                if self._fist_since is None:
+                    self._fist_since = now
+                held_loose = now - self._fist_since
+                self._was_fist = True
+                self._fist_released_at = None
+                self._thumbs_since = None
+                self._reset_pinch()
+                self.last_label = f"fist {held_loose:.1f}s"
+                return None
+
+            held = now - (self._fist_since or now)
             self._was_fist = True
             self._fist_released_at = None
             self._thumbs_since = None
             self._reset_pinch()
-            # Sustained closed fist → arm/disarm.
-            # Use closed (not only strict is_fist): webcam angles often fail the
-            # strict thumb/tip checks while HUD already shows "fist".
-            if held >= self.arm_hold_sec and (fist or _index_curled(lms)):
+            # Arm only after a real fist was seen; _index_curled only maintains hold.
+            if held >= self.arm_hold_sec and self._fist_strict_seen and (
+                fist or _index_curled(lms)
+            ):
                 self.armed = not self.armed
                 self._fist_since = now + 999
                 self.last_label = "ARMED" if self.armed else "DISARMED"
                 self._was_fist = False
+                self._fist_strict_seen = False
                 self._arm_latched = True
                 return self._fire("toggle_arm", ignore_cooldown=True)
             self.last_label = f"fist {held:.1f}s"
@@ -482,6 +524,7 @@ class GestureEngine:
                 self._was_fist = False
                 self._fist_released_at = None
                 self._fist_since = None
+                self._fist_strict_seen = False
             elif self.armed and opening:
                 # Fire first; only clear intent if it actually fired.
                 fired = self._fire("play_pause", ignore_cooldown=True)
@@ -489,6 +532,7 @@ class GestureEngine:
                     self._was_fist = False
                     self._fist_released_at = None
                     self._fist_since = None
+                    self._fist_strict_seen = False
                     self._thumbs_since = None
                     self._mc_block_until = now + 0.6
                     self._cx_hist.clear()
@@ -504,6 +548,7 @@ class GestureEngine:
                 return None
 
         self._fist_since = None
+        self._fist_strict_seen = False
 
         if not self.armed:
             self.last_label = "DISARMED"
@@ -556,17 +601,16 @@ class GestureEngine:
                     self.last_label = "pinch…"
                     return None
 
-            # Still long enough without volume → arm screenshot on release.
-            # Once SNAP is ready, keep it until motion / volume / hand opens
-            # (do not expire back to a countdown timer — that confused users).
+            # Arm screenshot on still hold within snap_max_sec; expire after that.
             if (
                 not self._pinch_did_volume
-                and not self._pinch_snap_ready
                 and self._pinch_acc < 0.55
                 and held >= self.snap_hold_sec
                 and held <= self.snap_max_sec
             ):
                 self._pinch_snap_ready = True
+            elif held > self.snap_max_sec:
+                self._pinch_snap_ready = False
 
             if self._pinch_y0 is None:
                 self._pinch_y0 = self._pinch_y_smooth
@@ -615,14 +659,11 @@ class GestureEngine:
                 return self._fire("volume_up" if self._pinch_dir > 0 else "volume_down")
             return None
 
-        # Pinch ended. Screenshot only when the pinch itself opens (thumb↔index
-        # separates) or the hand goes to an open palm — NOT when the other three
-        # fingers rise into an OK while tips stay pinched.
+        # Pinch ended. Release threshold == PINCH_GAP_END so gradual open
+        # (0.35 → 0.37 → 0.5) still screenshots; no gap dead-zone cancel.
         if self._pinch_since is not None:
             gap = _pinch_gap(lms)
-            # Release = thumb↔index actually separates. Open palm alone is not
-            # enough if tips are still pinched (OK / three fingers up).
-            pinch_opened = gap > 0.38 or (palm and gap > 0.30 and not ok)
+            pinch_opened = gap > PINCH_GAP_END or (palm and gap > PINCH_GAP_END * 0.9 and not ok)
             if (
                 now < self._pinch_hold_until
                 and (self._pinch_did_volume or (self._pinch_armed and self._pinch_acc >= 0.45))
@@ -630,7 +671,7 @@ class GestureEngine:
                 self.last_label = "volume"
                 return None
             if not pinch_opened:
-                # Still pinched (e.g. raised other fingers into OK) → cancel snap.
+                # Still closed tips (e.g. OK fingers) → cancel snap, keep session drop.
                 self._reset_pinch()
             else:
                 snap = self._finish_pinch_session(now)

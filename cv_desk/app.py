@@ -130,10 +130,8 @@ class CVDeskApp:
         with self._cfg_lock:
             self.cfg = apply_to_config(self.cfg, values, preset)
             save_config(self.cfg)
+        # Worker applies between frames (single path — avoids double-apply races).
         self._queue_engine("sensitivity", values)
-        # Also apply immediately under lock for tray responsiveness when idle.
-        with self._engine_lock:
-            apply_to_engine(self.engine, values)
         self._status = f"sens: {preset}"
 
     def set_preset(self, name: str) -> None:
@@ -233,13 +231,52 @@ class CVDeskApp:
             cv2.namedWindow(win, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(win, 480, 360)
         last_id = 0
+
+        def _cli_wait_key() -> bool:
+            """Return True if user asked to quit. Always pump HighGUI when previewing."""
+            if not opencv_preview:
+                return False
+            key = cv2.waitKey(1) & 0xFF
+            if key in (27, ord("q")):
+                self.quit()
+                return True
+            return False
+
+        def _placeholder_bgr(msg: str) -> np.ndarray:
+            img = np.zeros((360, 480, 3), dtype=np.uint8)
+            cv2.putText(
+                img,
+                msg[:48],
+                (16, 180),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (200, 200, 200),
+                1,
+                cv2.LINE_AA,
+            )
+            return img
+
         while not self._stop.is_set():
             if self.cam.error:
                 self._status = self.cam.error
-                time.sleep(0.5)
+                if opencv_preview:
+                    vis = _placeholder_bgr(self.cam.error)
+                    with self._preview_lock:
+                        self._preview_bgr = vis
+                    cv2.imshow(win, vis)
+                    if _cli_wait_key():
+                        break
+                time.sleep(0.05)
                 continue
             fid, frame, lms = self.cam.wait_new_frame(last_id, timeout=0.25)
             if frame is None or fid == last_id:
+                if opencv_preview:
+                    vis = _placeholder_bgr("Waiting for camera…")
+                    with self._preview_lock:
+                        self._preview_bgr = vis
+                    cv2.imshow(win, vis)
+                    if _cli_wait_key():
+                        break
                 continue
             last_id = fid
             # CLI runs on the main thread — pump Cocoa so frontmostApplication updates.
@@ -271,9 +308,7 @@ class CVDeskApp:
                     self._preview_bgr = vis
                 if opencv_preview:
                     cv2.imshow(win, vis)
-                    key = cv2.waitKey(1) & 0xFF
-                    if key in (27, ord("q")):
-                        self.quit()
+                    if _cli_wait_key():
                         break
         if opencv_preview:
             try:

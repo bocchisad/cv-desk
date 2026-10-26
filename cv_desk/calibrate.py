@@ -79,19 +79,20 @@ def run_calibrate(camera_pref: int | str | None = None) -> int:
     print(f"CV Desk calibrate | camera [{idx}] {name}")
     print("Swipe palm L/R ×3 → pinch↕ ×2 → [s] save / [Esc] cancel / [Space] skip phase")
 
+    last_fid = 0
     try:
         while True:
             if cam.error:
                 status = cam.error
-                time.sleep(0.2)
-            _fid, frame, lms = cam.get()
-            if frame is None:
-                time.sleep(0.01)
+                time.sleep(0.05)
+            fid, frame, lms = cam.wait_new_frame(last_fid, timeout=0.25)
+            if frame is None or fid == last_fid:
                 key = cv2.waitKey(1) & 0xFF
                 if key in (27, ord("q")):
                     print("cancelled")
                     return 1
                 continue
+            last_fid = fid
 
             now = time.monotonic()
             if lms is not None:
@@ -195,5 +196,5 @@ def run_calibrate(camera_pref: int | str | None = None) -> int:
         cam.stop()
         try:
             cv2.destroyAllWindows()
-        except Exception:
+        except cv2.error:
             pass

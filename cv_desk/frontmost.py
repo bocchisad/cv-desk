@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import time
+
+from cv_desk._objc_exc import OBJC_CATCH
+
+log = logging.getLogger(__name__)
 
 # Only our own app identity — do NOT filter Terminal / iTerm / Xcode / python hosts
 # so profiles can target those apps when they are frontmost.
@@ -36,8 +41,8 @@ def _pump_runloop(seconds: float = 0.02) -> None:
         NSRunLoop.currentRunLoop().runUntilDate_(
             NSDate.dateWithTimeIntervalSinceNow_(float(seconds))
         )
-    except (AttributeError, TypeError, RuntimeError):
-        pass
+    except OBJC_CATCH as e:
+        log.debug("NSRunLoop pump: %s", e)
 
 
 def frontmost_app(*, pump: bool = False) -> tuple[str, str]:
@@ -66,7 +71,8 @@ def frontmost_app_info(*, pump: bool = False) -> tuple[str, str, int | None]:
         except (TypeError, ValueError, AttributeError):
             pid = None
         return bid, name, pid
-    except (AttributeError, TypeError, RuntimeError):
+    except OBJC_CATCH as e:
+        log.debug("frontmostApplication: %s", e)
         return "", "?", None
 
 

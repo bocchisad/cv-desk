@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import tempfile
 import threading
@@ -17,6 +18,7 @@ import numpy as np
 from cv_desk.frontmost import is_self_app
 from cv_desk.vision import camera as camera_mod
 from cv_desk.vision.gestures import (
+    PINCH_GAP_END,
     GestureEngine,
     is_closed_hand,
     is_fist,
@@ -454,39 +456,6 @@ class GestureDisambiguation(unittest.TestCase):
         self.assertTrue(is_pinch(pinch))
         self.assertFalse(is_ok(pinch))
 
-    def test_snap_ready_survives_long_hold(self):
-        eng = GestureEngine(
-            cooldown_sec=0.0,
-            pinch_arm_sec=0.05,
-            snap_hold_sec=0.05,
-            snap_max_sec=0.2,
-            pinch_deadzone=0.05,
-        )
-        pinch = _lms({
-            4: (0.48, 0.40),
-            8: (0.50, 0.40),
-            6: (0.50, 0.48),
-            12: (0.52, 0.55),
-            10: (0.52, 0.48),
-            16: (0.55, 0.55),
-            14: (0.55, 0.48),
-            20: (0.58, 0.55),
-            18: (0.58, 0.48),
-            0: (0.5, 0.70),
-            9: (0.5, 0.50),
-        })
-        eng.update(pinch)
-        eng._pinch_since = time.monotonic() - 0.15
-        eng._pinch_armed = True
-        eng.update(pinch)
-        self.assertTrue(eng._pinch_snap_ready)
-        self.assertEqual(eng.last_label, "SNAP ✓ open")
-        # Past snap_max_sec — must keep SNAP, not fall back to a timer.
-        eng._pinch_since = time.monotonic() - 1.0
-        eng.update(pinch)
-        self.assertTrue(eng._pinch_snap_ready)
-        self.assertEqual(eng.last_label, "SNAP ✓ open")
-
     def test_engine_open_palm_does_not_fire_app_expose(self):
         eng = GestureEngine(cooldown_sec=0.0, three_hold_sec=0.05)
         palm = _open_palm()
@@ -568,6 +537,286 @@ class ScreenshotPrefersScreencapture(unittest.TestCase):
             self.assertTrue(run.called)
             self.assertEqual(run.call_args[0][0][0], "/usr/sbin/screencapture")
             self.assertIn("screenshot", msg)
+
+
+def _pinch_gap_lms(gap: float):
+    """Pinch-like pose with thumb↔index separation ≈ gap * hand_size."""
+    # hs ≈ 0.20 (wrist 0.70 → middle MCP 0.50)
+    half = (gap * 0.20) / 2
+    return _lms({
+        4: (0.50 - half, 0.40),
+        8: (0.50 + half, 0.40),
+        6: (0.50, 0.48),
+        5: (0.48, 0.50),
+        12: (0.52, 0.55),
+        10: (0.52, 0.48),
+        16: (0.55, 0.55),
+        14: (0.55, 0.48),
+        20: (0.58, 0.55),
+        18: (0.58, 0.48),
+        0: (0.5, 0.70),
+        9: (0.5, 0.50),
+    })
+
+
+def _rotate_lms(lms, degrees: float, cx: float = 0.5, cy: float = 0.5):
+    rad = math.radians(degrees)
+    cos_a, sin_a = math.cos(rad), math.sin(rad)
+    out = []
+    for p in lms:
+        x, y = p.x - cx, p.y - cy
+        out.append(
+            SimpleNamespace(
+                x=cx + x * cos_a - y * sin_a,
+                y=cy + x * sin_a + y * cos_a,
+                z=getattr(p, "z", 0.0),
+            )
+        )
+    return out
+
+
+def _three_finger():
+    return _lms({
+        8: (0.40, 0.25),
+        6: (0.40, 0.40),
+        5: (0.40, 0.48),
+        12: (0.48, 0.22),
+        10: (0.48, 0.40),
+        16: (0.55, 0.24),
+        14: (0.55, 0.40),
+        13: (0.55, 0.48),
+        20: (0.62, 0.55),
+        18: (0.62, 0.48),
+        17: (0.62, 0.52),
+        0: (0.5, 0.75),
+        9: (0.5, 0.45),
+        4: (0.35, 0.50),
+        2: (0.38, 0.55),
+    })
+
+
+class PinchReleaseHysteresis(unittest.TestCase):
+    """Gradual pinch open must still screenshot (no 0.34–0.38 dead zone)."""
+
+    def test_gradual_open_screenshots_once(self):
+        eng = GestureEngine(
+            cooldown_sec=0.0,
+            pinch_arm_sec=0.0,
+            snap_hold_sec=0.05,
+            snap_max_sec=2.0,
+            pinch_deadzone=0.05,
+        )
+        closed = _pinch_gap_lms(0.30)
+        self.assertTrue(is_pinch(closed))
+        eng.update(closed)
+        eng._pinch_since = time.monotonic() - 0.2
+        eng._pinch_armed = True
+        eng._pinch_snap_ready = True
+        actions = []
+        for gap in (0.35, 0.37, 0.39, 0.50):
+            self.assertGreater(gap, PINCH_GAP_END)
+            a = eng.update(_pinch_gap_lms(gap))
+            if a:
+                actions.append(a)
+                eng.commit_fire()
+        self.assertEqual(actions, ["screenshot"])
+
+
+class SnapMaxTimeout(unittest.TestCase):
+    """Long pinch hold expires snap — release must not screenshot."""
+
+    def test_long_hold_no_screenshot_short_does(self):
+        open_h = _open_palm()
+        pinch = _pinch_gap_lms(0.20)
+
+        eng_long = GestureEngine(
+            cooldown_sec=0.0,
+            pinch_arm_sec=0.0,
+            snap_hold_sec=0.05,
+            snap_max_sec=1.5,
+            pinch_deadzone=0.05,
+        )
+        eng_long.update(pinch)
+        eng_long._pinch_since = time.monotonic() - 4.0
+        eng_long._pinch_armed = True
+        eng_long.update(pinch)
+        self.assertFalse(eng_long._pinch_snap_ready)
+        self.assertNotEqual(eng_long.update(open_h), "screenshot")
+
+        eng_short = GestureEngine(
+            cooldown_sec=0.0,
+            pinch_arm_sec=0.0,
+            snap_hold_sec=0.05,
+            snap_max_sec=1.5,
+            pinch_deadzone=0.05,
+        )
+        eng_short.update(pinch)
+        eng_short._pinch_since = time.monotonic() - 0.3
+        eng_short._pinch_armed = True
+        eng_short._pinch_snap_ready = True
+        self.assertEqual(eng_short.update(open_h), "screenshot")
+
+
+class ArmRequiresStrictFist(unittest.TestCase):
+    """Half-closed hand must not toggle_arm; real fist must."""
+
+    def test_half_closed_no_arm(self):
+        eng = GestureEngine(cooldown_sec=0.0, arm_hold_sec=0.05)
+        # Only index curled; others extended — not a fist.
+        half = _lms({
+            8: (0.48, 0.58),
+            6: (0.48, 0.52),
+            5: (0.48, 0.55),
+            12: (0.45, 0.22),
+            10: (0.47, 0.40),
+            16: (0.55, 0.24),
+            14: (0.55, 0.40),
+            20: (0.68, 0.28),
+            18: (0.62, 0.40),
+            4: (0.32, 0.50),
+            2: (0.38, 0.55),
+            0: (0.50, 0.78),
+            9: (0.50, 0.45),
+            13: (0.55, 0.45),
+            17: (0.62, 0.45),
+        })
+        self.assertFalse(is_fist(half))
+        eng.update(half)
+        eng._fist_since = time.monotonic() - 0.2
+        self.assertIsNone(eng.update(half))
+        self.assertFalse(eng._fist_strict_seen)
+
+    def test_real_fist_arms(self):
+        eng = GestureEngine(cooldown_sec=0.0, arm_hold_sec=0.05)
+        fist = _fist()
+        self.assertTrue(is_fist(fist))
+        eng.update(fist)
+        eng._fist_since = time.monotonic() - 0.2
+        self.assertEqual(eng.update(fist), "toggle_arm")
+
+
+class RotationInvariantGestures(unittest.TestCase):
+    """Fist / palm / three / pinch classify the same at many rotations."""
+
+    def test_labels_stable_under_rotation(self):
+        templates = {
+            "fist": (_fist(), is_fist, True),
+            "palm": (_open_palm(), is_open_palm, True),
+            "three": (_three_finger(), is_three_finger, True),
+            "pinch": (_pinch_gap_lms(0.20), is_pinch, True),
+        }
+        for name, (base, pred, expect) in templates.items():
+            for deg in (0, 45, 90, 135, 180, 270):
+                rotated = _rotate_lms(base, deg)
+                self.assertEqual(
+                    pred(rotated),
+                    expect,
+                    msg=f"{name} at {deg}°",
+                )
+            # Cross-checks: palm must never be three; fist never pinch
+            if name == "palm":
+                for deg in (0, 90, 180, 270):
+                    self.assertFalse(is_three_finger(_rotate_lms(base, deg)))
+            if name == "fist":
+                for deg in (0, 90, 180, 270):
+                    self.assertFalse(is_pinch(_rotate_lms(base, deg)))
+
+
+class ModelHashPreservesManual(unittest.TestCase):
+    """Failed download must not delete an existing (even hash-mismatched) model."""
+
+    def test_offline_keeps_bad_cache(self):
+        with tempfile.TemporaryDirectory() as td:
+            model = Path(td) / "hand_landmarker.task"
+            payload = b"manual-model-bytes-" + b"z" * 2000
+            model.write_bytes(payload)
+
+            def boom(*_a, **_k):
+                raise OSError("network down")
+
+            with mock.patch.object(camera_mod, "MODEL_PATH", model):
+                with mock.patch.object(camera_mod, "MODEL_SHA256", "deadbeef" * 8):
+                    with mock.patch.dict(os.environ, {}, clear=False):
+                        os.environ.pop("CVDESK_HAND_MODEL", None)
+                        with mock.patch.object(
+                            camera_mod.urllib.request, "urlretrieve", side_effect=boom
+                        ):
+                            with self.assertRaises(RuntimeError) as ctx:
+                                camera_mod.ensure_model()
+            self.assertTrue(model.is_file())
+            self.assertEqual(model.read_bytes(), payload)
+            self.assertIn("untouched", str(ctx.exception).lower())
+
+    def test_env_override_skips_hash(self):
+        with tempfile.TemporaryDirectory() as td:
+            custom = Path(td) / "custom.task"
+            custom.write_bytes(b"y" * 2000)
+            with mock.patch.dict(os.environ, {"CVDESK_HAND_MODEL": str(custom)}):
+                out = camera_mod.ensure_model()
+            self.assertEqual(out, custom)
+
+
+class CameraDetectRecovery(unittest.TestCase):
+    """Detect errors must not kill the thread; error set then cleared."""
+
+    def test_detect_errors_recover(self):
+        cam = camera_mod.HandCameraThread(0, "fake")
+        calls = {"n": 0}
+        frames = {"cap": 0}
+
+        class FakeCap:
+            def isOpened(self):
+                return True
+
+            def read(self):
+                frames["cap"] += 1
+                return True, np.zeros((48, 64, 3), dtype=np.uint8)
+
+            def set(self, *_a):
+                return True
+
+            def release(self):
+                pass
+
+        class FakeLM:
+            def detect_for_video(self, *_a, **_k):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise RuntimeError("boom1")
+                if calls["n"] == 2:
+                    raise ValueError("boom2")
+                return SimpleNamespace(hand_landmarks=[])
+
+            def close(self):
+                pass
+
+        created = {"n": 0}
+
+        def fake_create():
+            created["n"] += 1
+            return FakeLM()
+
+        cam._create_landmarker = fake_create  # type: ignore[method-assign]
+        cam._open_capture = lambda: FakeCap()  # type: ignore[method-assign]
+        cam._detect_for_video = lambda lm, img, ts: lm.detect_for_video(img, ts)  # type: ignore
+
+        cam.start()
+        deadline = time.monotonic() + 3.0
+        saw_error = False
+        cleared = False
+        while time.monotonic() < deadline:
+            if cam.error:
+                saw_error = True
+            if saw_error and cam.error is None and cam._frame_id > 0:
+                cleared = True
+                break
+            time.sleep(0.02)
+        cam.stop()
+        cam.join(timeout=2.0)
+        self.assertTrue(cam.is_alive() is False or not cam.is_alive())
+        self.assertTrue(saw_error)
+        self.assertTrue(cleared)
+        self.assertGreaterEqual(created["n"], 2)
 
 
 if __name__ == "__main__":

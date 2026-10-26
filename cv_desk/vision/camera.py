@@ -59,14 +59,29 @@ def _model_ok(path: Path) -> bool:
 
 
 def ensure_model() -> Path:
+    """Ensure hand_landmarker.task is present and valid.
+
+    Set CVDESK_HAND_MODEL to a local path to skip the SHA-256 check (logged).
+    On hash mismatch, download to a temp file first; only replace the cache
+    after a successful verified download — never delete the existing file first.
+    """
+    override = (os.environ.get("CVDESK_HAND_MODEL") or "").strip()
+    if override:
+        path = Path(override).expanduser()
+        if not path.is_file() or path.stat().st_size < 1000:
+            raise RuntimeError(f"CVDESK_HAND_MODEL missing or empty: {path}")
+        log.warning("using CVDESK_HAND_MODEL=%s (SHA-256 check skipped)", path)
+        return path
+
     if _model_ok(MODEL_PATH):
         return MODEL_PATH
+
     if MODEL_PATH.exists():
-        log.warning("hand model hash mismatch or corrupt — re-downloading: %s", MODEL_PATH)
-        try:
-            MODEL_PATH.unlink()
-        except OSError:
-            pass
+        log.warning(
+            "hand model hash mismatch or corrupt — will re-download without deleting yet: %s",
+            MODEL_PATH,
+        )
+
     MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = MODEL_PATH.with_suffix(".task.part")
     print(f"Downloading hand model → {MODEL_PATH}")
@@ -82,9 +97,11 @@ def ensure_model() -> Path:
             tmp.unlink()
         except OSError:
             pass
+        # Keep any existing on-disk model (even if hash-mismatched / manual).
         raise RuntimeError(
             f"failed to download hand model (need network): {e}\n"
-            f"  place file manually at {MODEL_PATH}"
+            f"  existing file left untouched at {MODEL_PATH}\n"
+            f"  or set CVDESK_HAND_MODEL=/path/to/hand_landmarker.task"
         ) from e
     if not _model_ok(tmp):
         try:
@@ -250,95 +267,118 @@ class HandCameraThread(threading.Thread):
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         return cap
 
+    def _create_landmarker(self):
+        model = ensure_model()
+        opts = vision.HandLandmarkerOptions(
+            base_options=BaseOptions(
+                model_asset_path=str(model),
+                delegate=BaseOptions.Delegate.CPU,
+            ),
+            running_mode=vision.RunningMode.VIDEO,
+            num_hands=1,
+            min_hand_detection_confidence=0.55,
+            min_hand_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        return vision.HandLandmarker.create_from_options(opts)
+
+    def _detect_for_video(self, landmarker, mp_image, ts: int):
+        """Hook for tests — production calls MediaPipe detect_for_video."""
+        return landmarker.detect_for_video(mp_image, ts)
+
     def run(self):
-        landmarker = None
-        cap = None
-        try:
-            model = ensure_model()
-            opts = vision.HandLandmarkerOptions(
-                base_options=BaseOptions(
-                    model_asset_path=str(model),
-                    delegate=BaseOptions.Delegate.CPU,
-                ),
-                running_mode=vision.RunningMode.VIDEO,
-                num_hands=1,
-                min_hand_detection_confidence=0.55,
-                min_hand_presence_confidence=0.5,
-                min_tracking_confidence=0.5,
-            )
-            landmarker = vision.HandLandmarker.create_from_options(opts)
-        except (RuntimeError, OSError, ValueError, TypeError) as e:
-            self.error = f"model: {e}"
-            return
-
-        try:
-            cap = self._open_capture()
-            if not cap.isOpened():
-                self.error = f"camera {self.camera_index} ({self.camera_name}) failed"
-                log.error("%s", self.error)
-                return
-
-            ts = 0
-            last_ok = time.monotonic()
-            backoff = 0.5
-            while not self._stop.is_set():
-                ok, frame = cap.read()
-                if not ok:
-                    now = time.monotonic()
-                    if now - last_ok >= _NO_FRAME_ERROR_SEC:
-                        msg = f"camera lost: {self.camera_name} (no frames)"
-                        if self.error != msg:
-                            self.error = msg
-                            log.error("%s — reopening (backoff %.1fs)", msg, backoff)
-                        try:
-                            cap.release()
-                        except cv2.error:
-                            pass
-                        time.sleep(backoff)
-                        backoff = min(backoff * 2.0, 8.0)
-                        cap = self._open_capture()
-                        if not cap.isOpened():
-                            continue
-                        # Don't reset last_ok until a real frame arrives.
-                    else:
-                        time.sleep(0.05)
+        """Capture loop: never exit until stop(); reopen/recreate on errors with backoff."""
+        backoff = 0.5
+        while not self._stop.is_set():
+            landmarker = None
+            cap = None
+            try:
+                try:
+                    landmarker = self._create_landmarker()
+                except Exception as e:
+                    self.error = f"model: {e}"
+                    log.exception("hand model / landmarker failed")
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2.0, 8.0)
                     continue
 
-                last_ok = time.monotonic()
-                backoff = 0.5
-                if self.error and self.error.startswith("camera lost"):
-                    log.info("camera recovered: %s", self.camera_name)
-                    self.error = None
+                cap = self._open_capture()
+                if not cap.isOpened():
+                    self.error = f"camera {self.camera_index} ({self.camera_name}) failed"
+                    log.error("%s — retrying (backoff %.1fs)", self.error, backoff)
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2.0, 8.0)
+                    continue
 
-                frame = cv2.flip(frame, 1)
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-                now_ms = int(time.monotonic() * 1000)
-                if now_ms <= ts:
-                    now_ms = ts + 1
-                ts = now_ms
-                try:
-                    result = landmarker.detect_for_video(mp_image, ts)
-                except RuntimeError as e:
-                    self.error = f"detect: {e}"
-                    log.error("%s", self.error)
-                    break
-                lms = None
-                if result.hand_landmarks:
-                    lms = _plain(result.hand_landmarks[0])
-                with self._cond:
-                    self._frame = frame
-                    self._lms = lms
-                    self._frame_id += 1
-                    self._cond.notify_all()
-        finally:
-            if cap is not None:
-                try:
-                    cap.release()
-                except cv2.error:
-                    pass
-            if landmarker is not None:
-                try:
-                    landmarker.close()
-                except (RuntimeError, AttributeError):
-                    pass
+                ts = 0
+                last_ok = time.monotonic()
+                session_backoff = 0.5
+                while not self._stop.is_set():
+                    try:
+                        ok, frame = cap.read()
+                        if not ok:
+                            now = time.monotonic()
+                            if now - last_ok >= _NO_FRAME_ERROR_SEC:
+                                msg = f"camera lost: {self.camera_name} (no frames)"
+                                if self.error != msg:
+                                    self.error = msg
+                                    log.error(
+                                        "%s — reopening (backoff %.1fs)", msg, session_backoff
+                                    )
+                                try:
+                                    cap.release()
+                                except cv2.error:
+                                    pass
+                                time.sleep(session_backoff)
+                                session_backoff = min(session_backoff * 2.0, 8.0)
+                                cap = self._open_capture()
+                                if not cap.isOpened():
+                                    continue
+                            else:
+                                time.sleep(0.05)
+                            continue
+
+                        last_ok = time.monotonic()
+                        session_backoff = 0.5
+                        backoff = 0.5
+                        if self.error:
+                            log.info("camera recovered: %s", self.camera_name)
+                            self.error = None
+
+                        frame = cv2.flip(frame, 1)
+                        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                        now_ms = int(time.monotonic() * 1000)
+                        if now_ms <= ts:
+                            now_ms = ts + 1
+                        ts = now_ms
+                        result = self._detect_for_video(landmarker, mp_image, ts)
+                        lms = None
+                        if result.hand_landmarks:
+                            lms = _plain(result.hand_landmarks[0])
+                        with self._cond:
+                            self._frame = frame
+                            self._lms = lms
+                            self._frame_id += 1
+                            self._cond.notify_all()
+                    except Exception as e:
+                        # Any detect / OpenCV failure → error state, recreate session.
+                        self.error = f"detect: {e}"
+                        log.exception("camera/detect error — will reopen")
+                        break
+            finally:
+                if cap is not None:
+                    try:
+                        cap.release()
+                    except cv2.error:
+                        pass
+                if landmarker is not None:
+                    try:
+                        landmarker.close()
+                    except (RuntimeError, AttributeError):
+                        pass
+
+            if self._stop.is_set():
+                break
+            time.sleep(backoff)
+            backoff = min(backoff * 2.0, 8.0)

@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Callable
 
 import cv2
 import numpy as np
+
+from cv_desk._objc_exc import OBJC_CATCH
+
+log = logging.getLogger(__name__)
 
 
 class CocoaPreview:
@@ -63,8 +68,8 @@ class CocoaPreview:
         if self._on_close:
             try:
                 self._on_close()
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001 — user callback may raise anything
+                log.warning("preview on_close: %s", e)
 
     def show(self) -> None:
         self._win.makeKeyAndOrderFront_(None)
@@ -79,7 +84,8 @@ class CocoaPreview:
             vis = bool(self._win.isVisible())
             self._visible = vis
             return vis
-        except Exception:
+        except OBJC_CATCH as e:
+            log.debug("isVisible: %s", e)
             return self._visible
 
     def set_bgr(self, frame: np.ndarray) -> None:

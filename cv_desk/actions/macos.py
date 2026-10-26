@@ -7,6 +7,8 @@ import subprocess
 import time
 from typing import Callable
 
+from cv_desk._objc_exc import OBJC_CATCH
+
 log = logging.getLogger(__name__)
 
 # NX media key codes
@@ -59,7 +61,8 @@ def _ax_trusted() -> bool | None:
         return bool(AXIsProcessTrusted())
     except ImportError:
         return None
-    except (AttributeError, TypeError, RuntimeError):
+    except OBJC_CATCH as e:
+        log.debug("AXIsProcessTrusted: %s", e)
         return None
 
 
@@ -92,7 +95,8 @@ def _media_key_quartz(key: int) -> bool:
         time.sleep(0.02)
         post(False)
         return True
-    except (AttributeError, TypeError, RuntimeError):
+    except OBJC_CATCH as e:
+        log.warning("media key quartz failed: %s", e)
         return False
 
 
@@ -287,7 +291,7 @@ def _screenshot_quartz(path) -> tuple[bool, str]:
         if not path.is_file():
             return False, "screenshot: file missing after write"
         return True, f"screenshot → {path.name}"
-    except (AttributeError, TypeError, RuntimeError, OSError) as e:
+    except OBJC_CATCH as e:
         return False, str(e)
 
 
