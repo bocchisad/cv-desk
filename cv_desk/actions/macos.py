@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import time
 from typing import Callable
+
+log = logging.getLogger(__name__)
 
 # NX media key codes
 _NX_SOUND_UP = 0
@@ -13,6 +16,8 @@ _NX_MUTE = 7
 _NX_PLAY = 16
 _NX_NEXT = 17
 _NX_PREV = 18
+
+_ax_hint_shown = False
 
 
 def _osascript(script: str) -> tuple[bool, str]:
@@ -26,8 +31,36 @@ def _osascript(script: str) -> tuple[bool, str]:
         if r.returncode != 0:
             return False, (r.stderr or r.stdout or "osascript failed").strip()
         return True, (r.stdout or "").strip()
-    except Exception as e:
+    except (OSError, subprocess.TimeoutExpired) as e:
         return False, str(e)
+
+
+def _ax_trusted() -> bool | None:
+    """Return True/False if AX trust is known; None if the API is unavailable."""
+    try:
+        import ctypes
+
+        lib = ctypes.cdll.LoadLibrary(
+            "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+        )
+        lib.AXIsProcessTrusted.restype = ctypes.c_bool
+        return bool(lib.AXIsProcessTrusted())
+    except (OSError, AttributeError):
+        pass
+    try:
+        from ApplicationServices import AXIsProcessTrusted  # type: ignore
+
+        return bool(AXIsProcessTrusted())
+    except ImportError:
+        pass
+    try:
+        from Quartz import AXIsProcessTrusted  # type: ignore
+
+        return bool(AXIsProcessTrusted())
+    except ImportError:
+        return None
+    except (AttributeError, TypeError, RuntimeError):
+        return None
 
 
 def _media_key_quartz(key: int) -> bool:
@@ -35,7 +68,7 @@ def _media_key_quartz(key: int) -> bool:
     try:
         from AppKit import NSEvent, NSSystemDefined  # type: ignore
         from Quartz import CGEventPost, kCGHIDEventTap  # type: ignore
-    except Exception:
+    except ImportError:
         return False
 
     def post(down: bool) -> None:
@@ -59,11 +92,23 @@ def _media_key_quartz(key: int) -> bool:
         time.sleep(0.02)
         post(False)
         return True
-    except Exception:
+    except (AttributeError, TypeError, RuntimeError):
         return False
 
 
 def _media_key(key: int) -> tuple[bool, str]:
+    global _ax_hint_shown
+    trusted = _ax_trusted()
+    if trusted is False:
+        if not _ax_hint_shown:
+            _ax_hint_shown = True
+            msg = (
+                "CV Desk: grant Accessibility (System Settings → Privacy) "
+                "so media keys work; using AppleScript fallback for now."
+            )
+            log.warning("%s", msg)
+            print(msg)
+        return False, "no accessibility — AppleScript fallback"
     if _media_key_quartz(key):
         return True, "ok"
     # Fallback: Control+F8 style won't work; try Spotify scripting for play
@@ -187,25 +232,27 @@ def app_expose() -> tuple[bool, str]:
     return (True, "App Exposé") if ok else (False, msg)
 
 
-def screenshot() -> tuple[bool, str]:
-    """
-    Capture the main display to Desktop.
+def _screenshot_screencapture(path) -> tuple[bool, str]:
+    """Primary path: /usr/sbin/screencapture (macOS 15-safe)."""
+    try:
+        r = subprocess.run(
+            ["/usr/sbin/screencapture", "-x", str(path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "screencapture failed").strip()
+        return False, err
+    if not path.is_file():
+        return False, "screenshot: file missing after screencapture"
+    return True, f"screenshot → {path.name}"
 
-    Synthetic ⌘⇧3 via System Events often returns OK but writes nothing on
-    modern macOS. Quartz CGWindowListCreateImage is reliable when the process
-    may read the screen (Screen Recording for Terminal / CV Desk.app).
-    """
-    from pathlib import Path
 
-    desktop = Path.home() / "Desktop"
-    desktop.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y-%m-%d at %H.%M.%S")
-    path = desktop / f"Screenshot {stamp}.png"
-    n = 1
-    while path.exists():
-        path = desktop / f"Screenshot {stamp}-{n}.png"
-        n += 1
-
+def _screenshot_quartz(path) -> tuple[bool, str]:
+    """Fallback when CGWindowListCreateImage is still available (pre-macOS 15 SDK)."""
     try:
         from Foundation import NSURL  # type: ignore
         from Quartz import (  # type: ignore
@@ -218,7 +265,7 @@ def screenshot() -> tuple[bool, str]:
             kCGWindowImageDefault,
             kCGWindowListOptionOnScreenOnly,
         )
-    except Exception as e:
+    except ImportError as e:
         return False, f"screenshot deps: {e}"
 
     try:
@@ -240,8 +287,38 @@ def screenshot() -> tuple[bool, str]:
         if not path.is_file():
             return False, "screenshot: file missing after write"
         return True, f"screenshot → {path.name}"
-    except Exception as e:
+    except (AttributeError, TypeError, RuntimeError, OSError) as e:
         return False, str(e)
+
+
+def screenshot() -> tuple[bool, str]:
+    """
+    Capture the main display to Desktop.
+
+    Prefer /usr/sbin/screencapture (works on macOS 15+). Fall back to
+    Quartz CGWindowListCreateImage when that API is still available.
+    """
+    from pathlib import Path
+
+    desktop = Path.home() / "Desktop"
+    desktop.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y-%m-%d at %H.%M.%S")
+    path = desktop / f"Screenshot {stamp}.png"
+    n = 1
+    while path.exists():
+        path = desktop / f"Screenshot {stamp}-{n}.png"
+        n += 1
+
+    ok, msg = _screenshot_screencapture(path)
+    if ok:
+        return ok, msg
+    # Clean partial file before Quartz attempt
+    try:
+        if path.exists() and path.stat().st_size == 0:
+            path.unlink()
+    except OSError:
+        pass
+    return _screenshot_quartz(path)
 
 
 ACTIONS: dict[str, Callable[[], tuple[bool, str]]] = {

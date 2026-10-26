@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  linux:
+    name: Linux pure-Python
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install deps (no rumps/pyobjc — vision tests only)
+        run: |
+          python -m pip install -U pip
+          # mediapipe pulls opencv-contrib-python; skip macOS-only rumps/pyobjc
+          python -m pip install "numpy>=1.24,<3" "mediapipe==0.10.35" ruff
+      - name: Ruff (critical)
+        run: ruff check cv_desk tests --select F,E9,B
+      - name: Unit tests
+        env:
+          PYTHONPATH: .
+        run: python -m unittest discover -s tests -q
+
+  macos:
+    name: macOS full
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15]
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install requirements
+        run: |
+          python -m pip install -U pip
+          python -m pip install -r requirements.txt
+      - name: Import cv_desk modules
+        env:
+          PYTHONPATH: .
+        run: |
+          python -c "
+          import importlib
+          import pkgutil
+          import cv_desk
+          failed = []
+          for m in pkgutil.walk_packages(cv_desk.__path__, cv_desk.__name__ + '.'):
+              try:
+                  importlib.import_module(m.name)
+              except Exception as e:
+                  failed.append(f'{m.name}: {e}')
+          if failed:
+              raise SystemExit('import failures:\\n' + '\\n'.join(failed))
+          print('imports OK')
+          "
+      - name: Unit tests
+        env:
+          PYTHONPATH: .
+        run: python -m unittest discover -s tests -q
+      - name: Build .app + lint Info.plist
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -U pip
+          .venv/bin/pip install -r requirements.txt
+          ./scripts/build_app.sh
+          plutil -lint "dist/CV Desk.app/Contents/Info.plist"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -11,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from cv_desk.profiles import merge_profile_maps
+
+log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PATH = ROOT / "config.default.json"
@@ -30,10 +33,13 @@ def load_config() -> dict[str, Any]:
     with _lock:
         ensure_user_config()
         default = json.loads(DEFAULT_PATH.read_text(encoding="utf-8"))
+        if not isinstance(default, dict):
+            default = {}
         try:
             user = json.loads(USER_PATH.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            # Corrupt file — keep a backup and fall back to defaults.
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            # Corrupt / non-UTF-8 file — keep a backup and fall back to defaults.
+            log.warning("config unreadable (%s) — backing up and using defaults", e)
             bak = USER_PATH.with_suffix(".json.bak")
             try:
                 shutil.copy(USER_PATH, bak)
@@ -51,12 +57,18 @@ def load_config() -> dict[str, Any]:
         elif "camera_index" in user:
             user["_camera_migrated_v1"] = True
         merged = {**default, **user}
-        actions = default.get("actions") or {}
-        user_actions = user.get("actions") if isinstance(user.get("actions"), dict) else {}
+        raw_actions = default.get("actions")
+        actions: dict[str, Any] = raw_actions if isinstance(raw_actions, dict) else {}
+        raw_user_actions = user.get("actions")
+        user_actions: dict[str, Any] = (
+            raw_user_actions if isinstance(raw_user_actions, dict) else {}
+        )
         merged["actions"] = {**actions, **user_actions}
+        raw_def_profiles = default.get("profiles")
+        raw_user_profiles = user.get("profiles")
         merged["profiles"] = merge_profile_maps(
-            default.get("profiles") if isinstance(default.get("profiles"), dict) else {},
-            user.get("profiles") if isinstance(user.get("profiles"), dict) else {},
+            raw_def_profiles if isinstance(raw_def_profiles, dict) else {},
+            raw_user_profiles if isinstance(raw_user_profiles, dict) else {},
         )
         return merged
 
@@ -80,7 +92,7 @@ def _atomic_write(path: Path, data: dict[str, Any]) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_name, path)
-    except Exception:
+    except OSError:
         try:
             os.unlink(tmp_name)
         except OSError:

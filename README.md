@@ -16,6 +16,13 @@ Hands free for the trackpad and keyboard — but the desk still needs play/pause
 
 ---
 
+## Requirements
+
+- **macOS 13+**
+- **Python 3.10+**
+- **Apple Silicon (arm64)** — MediaPipe `0.10.35` (required) publishes wheels for arm64 only; it will **not** install on Intel Macs
+- Webcam + the permissions below
+
 ## Quick start
 
 ```bash
@@ -36,11 +43,11 @@ Grant these to **Python** / **Terminal** / your IDE (the process that runs the v
 | Permission | Needed for |
 |------------|------------|
 | **Camera** | Hand tracking |
-| **Accessibility** | Spaces, Mission Control, App Exposé, System Events |
+| **Accessibility** | Media keys, Spaces, Mission Control, App Exposé, System Events |
 | **Screen Recording** | Screenshot → Desktop PNG |
+| **Automation** | AppleScript control of System Events / Music / Spotify (fallback when media keys lack Accessibility) |
 
 Config: `~/Library/Application Support/CVDesk/config.json`
-
 ---
 
 ## Gestures
@@ -71,7 +78,7 @@ Config: `~/Library/Application Support/CVDesk/config.json`
 | Calibrate | `PYTHONPATH=. python -m cv_desk --calibrate` |
 | Tests | `PYTHONPATH=. python -m unittest discover -s tests -q` |
 
-Optional **dev `.app`** (this machine only — resolves repo + `.venv` at launch, not redistributable):
+Optional **dev `.app`** — **unsigned, development-only** wrapper from `scripts/build_app.sh`. It is **not** notarized or redistributable: the launcher runs Python from a neighboring `.venv` and the repo source tree. Prefer `python -m cv_desk` for day-to-day use.
 
 ```bash
 ./scripts/build_app.sh
@@ -82,9 +89,9 @@ open "dist/CV Desk.app"
 
 ## Limitations (v1)
 
-- macOS 13+ only
+- macOS 13+ only; Apple Silicon required for MediaPipe 0.10.35
 - **Source install** — GitHub Releases ship source tags, not a notarized binary
-- TCC prompts attach to **Python**, not “CV Desk”
+- TCC prompts attach to **Python**, not “CV Desk” (unless you wrap with a signed app)
 - Lighting / camera angle affect MediaPipe reliability
 - Continuity Camera: prefer auto FaceTime; switch camera in the tray if needed
 

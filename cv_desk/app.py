@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import threading
 import time
+from typing import Any
 
 import cv2
+import numpy as np
 
 from cv_desk import __version__
 from cv_desk.actions import macos as actions
 from cv_desk.config import load_config, save_config
-from cv_desk.frontmost import frontmost_app, is_self_app
+from cv_desk.frontmost import frontmost_app_info, is_self_app, maybe_pump_cocoa
 from cv_desk.login_item import disable as login_disable
 from cv_desk.login_item import enable as login_enable
 from cv_desk.login_item import is_enabled as login_is_enabled
@@ -34,6 +37,8 @@ from cv_desk.ui.preview import draw_preview
 from cv_desk.vision.camera import HandCameraThread, list_camera_names, resolve_camera_index
 from cv_desk.vision.gestures import GestureEngine
 
+log = logging.getLogger(__name__)
+
 # engine action id → config actions flag
 _ACTION_FLAG = {
     "play_pause": "play_pause",
@@ -54,6 +59,7 @@ class CVDeskApp:
     def __init__(self, camera_pref: int | str | None = None):
         self.cfg = load_config()
         self._cfg_lock = threading.RLock()
+        self._engine_lock = threading.RLock()
         self.engine = GestureEngine(
             cooldown_sec=float(self.cfg.get("cooldown_sec", 0.40)),
             swipe_vx=float(self.cfg.get("swipe_vx", 0.38)),
@@ -71,20 +77,25 @@ class CVDeskApp:
         self._stop = threading.Event()
         self._status = f"cam: {name}"
         self._preview_lock = threading.Lock()
-        self._preview_bgr = None
+        self._preview_bgr: np.ndarray | None = None
         self._front_bundle = ""
         self._front_name = "default"
         self._front_at = 0.0
         self._worker: threading.Thread | None = None
+        # Engine updates from the main thread (settings) applied between frames.
+        self._engine_cmds: list[tuple[str, Any]] = []
+        self._engine_cmds_lock = threading.Lock()
 
-    def refresh_frontmost(self, *, force: bool = False) -> None:
-        """Sticky frontmost: ignore CV Desk / Python / Terminal so Profiles stay on the real app."""
+    def refresh_frontmost(self, *, force: bool = False, pump: bool = False) -> None:
+        """Sticky frontmost: ignore only CV Desk itself so Profiles can target Terminal etc."""
         now = time.monotonic()
         if not force and now - self._front_at < 0.45:
             return
         self._front_at = now
-        bid, name = frontmost_app()
-        if bid and not is_self_app(bid, name):
+        if pump:
+            maybe_pump_cocoa(0.0)
+        bid, name, pid = frontmost_app_info(pump=pump)
+        if bid and not is_self_app(bid, name, pid):
             self._front_bundle = bid
             self._front_name = name or "default"
         elif not self._front_bundle and bid:
@@ -101,11 +112,28 @@ class CVDeskApp:
         with self._cfg_lock:
             return profile_enabled(self.cfg, self._front_bundle, key)
 
+    def _queue_engine(self, kind: str, payload: Any = None) -> None:
+        with self._engine_cmds_lock:
+            self._engine_cmds.append((kind, payload))
+
+    def _drain_engine_cmds(self) -> None:
+        with self._engine_cmds_lock:
+            cmds = self._engine_cmds
+            self._engine_cmds = []
+        for kind, payload in cmds:
+            if kind == "sensitivity":
+                apply_to_engine(self.engine, payload)
+            elif kind == "armed":
+                self.engine.armed = bool(payload)
+
     def apply_sensitivity(self, values: dict, preset: str) -> None:
         with self._cfg_lock:
             self.cfg = apply_to_config(self.cfg, values, preset)
-            apply_to_engine(self.engine, values)
             save_config(self.cfg)
+        self._queue_engine("sensitivity", values)
+        # Also apply immediately under lock for tray responsiveness when idle.
+        with self._engine_lock:
+            apply_to_engine(self.engine, values)
         self._status = f"sens: {preset}"
 
     def set_preset(self, name: str) -> None:
@@ -140,19 +168,22 @@ class CVDeskApp:
     def dispatch(self, action: str | None) -> None:
         if not action:
             return
-        self.refresh_frontmost()
         if action == "toggle_arm":
             with self._cfg_lock:
-                self.cfg["armed"] = self.engine.armed
+                with self._engine_lock:
+                    self.cfg["armed"] = self.engine.armed
                 save_config(self.cfg)
-            self._status = "ARMED" if self.engine.armed else "DISARMED"
+            with self._engine_lock:
+                armed = self.engine.armed
+                self.engine.commit_fire()
+            self._status = "ARMED" if armed else "DISARMED"
             self._last_action_label = self._status
-            self.engine.commit_fire()
             return
 
         flag = _ACTION_FLAG.get(action)
         if flag is not None and not self._enabled(flag):
-            self.engine.reject_fire()
+            with self._engine_lock:
+                self.engine.reject_fire()
             self._status = f"off in {self._front_name}: {flag}"
             return
 
@@ -169,19 +200,24 @@ class CVDeskApp:
         }
 
         if action in ("volume_up", "volume_down"):
-            delta = self.engine.volume_step if action == "volume_up" else -self.engine.volume_step
+            with self._engine_lock:
+                step = self.engine.volume_step
+            delta = step if action == "volume_up" else -step
             ok, msg = actions.volume_delta(delta)
-            self.engine.commit_fire()
+            with self._engine_lock:
+                self.engine.commit_fire()
             self._status = msg if ok else f"err: {msg}"
             self._last_action_label = self._status
             return
 
         fn = mapping.get(action)
         if fn is None:
-            self.engine.reject_fire()
+            with self._engine_lock:
+                self.engine.reject_fire()
             return
         ok, msg = fn()
-        self.engine.commit_fire()
+        with self._engine_lock:
+            self.engine.commit_fire()
         self._status = msg if ok else f"err: {msg}"
         self._last_action_label = self._status
 
@@ -190,34 +226,44 @@ class CVDeskApp:
         Gesture loop.
         opencv_preview=True → OpenCV HighGUI (CLI, main thread only).
         Tray uses opencv_preview=False and Cocoa window on the rumps thread.
+        Processes each camera frame at most once (frame_id), no busy-loop.
         """
         win = "CV Desk"
         if opencv_preview:
             cv2.namedWindow(win, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(win, 480, 360)
+        last_id = 0
         while not self._stop.is_set():
             if self.cam.error:
                 self._status = self.cam.error
                 time.sleep(0.5)
                 continue
-            frame, lms = self.cam.get()
-            if frame is None:
-                time.sleep(0.01)
+            fid, frame, lms = self.cam.wait_new_frame(last_id, timeout=0.25)
+            if frame is None or fid == last_id:
                 continue
-            self.refresh_frontmost()
-            if lms is not None:
-                action = self.engine.update(lms)
-                self.dispatch(action)
-            else:
-                self.engine.on_hand_lost()
-            label = self.engine.last_label
+            last_id = fid
+            # CLI runs on the main thread — pump Cocoa so frontmostApplication updates.
+            if opencv_preview:
+                self.refresh_frontmost(pump=True)
+            with self._engine_lock:
+                self._drain_engine_cmds()
+                if lms is not None:
+                    action = self.engine.update(lms)
+                    label = self.engine.last_label
+                    armed = self.engine.armed
+                else:
+                    self.engine.on_hand_lost()
+                    action = None
+                    label = self.engine.last_label
+                    armed = self.engine.armed
+            self.dispatch(action)
             need_draw = self._show_preview or opencv_preview
             if need_draw:
                 vis = draw_preview(
                     frame,
                     lms,
                     label,
-                    self.engine.armed,
+                    armed,
                     self._last_action_label,
                     profile=self.profile_label(),
                 )
@@ -229,12 +275,10 @@ class CVDeskApp:
                     if key in (27, ord("q")):
                         self.quit()
                         break
-            else:
-                time.sleep(0.01)
         if opencv_preview:
             try:
                 cv2.destroyAllWindows()
-            except Exception:
+            except cv2.error:
                 pass
 
     def quit(self):
@@ -338,11 +382,13 @@ def run_tray():
             if want_preview:
                 try:
                     self._ensure_preview().show()
-                except Exception as e:
+                except (OSError, RuntimeError, AttributeError, TypeError) as e:
                     app_core._status = f"preview err: {e}"
                     app_core._show_preview = False
                     self.preview_item.state = False
-            self.login_item.state = login_is_enabled()
+            self._login_cached = login_is_enabled()
+            self.login_item.state = self._login_cached
+            self._cam_err_notified = False
             self._sync_sens_checks()
             self._sync_profile_menu()
             app_core.cam.start()
@@ -394,6 +440,10 @@ def run_tray():
             for key, item in self.profile_actions.items():
                 item.state = bool(eff.get(key, True))
 
+        def _refresh_login_cache(self) -> None:
+            self._login_cached = login_is_enabled()
+            self.login_item.state = self._login_cached
+
         def _ensure_preview(self) -> CocoaPreview:
             nonlocal preview_win
             if preview_win is None:
@@ -410,16 +460,34 @@ def run_tray():
         @rumps.timer(1.0)
         def _tick(self, _):
             try:
+                # Frontmost on the main rumps thread (Cocoa-safe).
                 app_core.refresh_frontmost()
                 self.status_item.title = f"Status: {app_core._status[:42]}"
-                self.armed_item.state = bool(app_core.engine.armed)
+                with app_core._engine_lock:
+                    self.armed_item.state = bool(app_core.engine.armed)
                 self.cam_item.title = f"Camera: {app_core.camera_name[:28]}"
-                self.login_item.state = login_is_enabled()
+                # Login item: use cache (launchctl is expensive); refresh only via toggle / opener.
+                self.login_item.state = self._login_cached
                 self._sync_sens_checks()
                 self._sync_profile_menu()
+                if app_core.cam.error:
+                    if not self._cam_err_notified:
+                        self._cam_err_notified = True
+                        log.error("camera: %s", app_core.cam.error)
+                        rumps.notification("CV Desk", "Camera", app_core.cam.error[:80])
+                else:
+                    self._cam_err_notified = False
                 if app_core._show_preview and preview_win is not None and not preview_win.is_visible():
                     self._preview_closed()
-            except Exception:
+            except (OSError, RuntimeError, AttributeError, TypeError):
+                pass
+
+        @rumps.timer(30.0)
+        def _login_tick(self, _):
+            """Background refresh of LaunchAgent status (avoid launchctl every 1s)."""
+            try:
+                self._refresh_login_cache()
+            except (OSError, RuntimeError):
                 pass
 
         @rumps.timer(0.07)
@@ -432,14 +500,16 @@ def run_tray():
                 frame = app_core.get_preview_bgr()
                 if frame is not None:
                     preview_win.set_bgr(frame)
-            except Exception:
+            except (OSError, RuntimeError, AttributeError, TypeError):
                 pass
 
         def toggle_arm(self, sender):
-            app_core.engine.armed = not app_core.engine.armed
-            sender.state = bool(app_core.engine.armed)
+            with app_core._engine_lock:
+                app_core.engine.armed = not app_core.engine.armed
+                armed = app_core.engine.armed
+            sender.state = bool(armed)
             with app_core._cfg_lock:
-                app_core.cfg["armed"] = app_core.engine.armed
+                app_core.cfg["armed"] = armed
                 save_config(app_core.cfg)
 
         def toggle_preview(self, sender):
@@ -450,7 +520,7 @@ def run_tray():
                 save_config(app_core.cfg)
             try:
                 win = self._ensure_preview()
-            except Exception as e:
+            except (OSError, RuntimeError, AttributeError, TypeError) as e:
                 app_core._status = f"preview err: {e}"
                 app_core._show_preview = False
                 sender.state = False
@@ -515,11 +585,12 @@ def run_tray():
             rumps.notification("CV Desk", name, "Reset to global actions")
 
         def toggle_login(self, sender):
-            if login_is_enabled():
+            if self._login_cached:
                 ok, msg = login_disable()
             else:
                 ok, msg = login_enable()
-            sender.state = login_is_enabled()
+            self._refresh_login_cache()
+            sender.state = self._login_cached
             app_core._status = msg if ok else f"err: {msg}"
             rumps.notification("CV Desk", "Launch at Login", msg)
 
@@ -535,9 +606,13 @@ def run_tray():
 
 def _parse_camera_arg(argv: list[str]) -> int | str | None:
     if "--list-cameras" in argv:
-        for i, name in list_camera_names() or [(0, "(none found)")]:
+        cams = list_camera_names()
+        if not cams:
+            print("No cameras found")
+            raise SystemExit(1)
+        auto_i, _ = resolve_camera_index("auto")
+        for i, name in cams:
             mark = ""
-            auto_i, _ = resolve_camera_index("auto")
             if i == auto_i:
                 mark = "  ← auto (MacBook preferred)"
             print(f"  [{i}] {name}{mark}")
@@ -545,7 +620,7 @@ def _parse_camera_arg(argv: list[str]) -> int | str | None:
     if "--camera" in argv:
         j = argv.index("--camera")
         if j + 1 >= len(argv):
-            print("usage: --camera <index|auto>")
+            print("usage: --camera <index|auto|name>")
             raise SystemExit(2)
         raw = argv[j + 1]
         return int(raw) if raw.isdigit() else raw
@@ -564,7 +639,11 @@ def main(argv: list[str] | None = None):
     else:
         if cam_pref is not None:
             cfg = load_config()
-            cfg["camera_index"] = cam_pref if cam_pref == "auto" else int(cam_pref)
+            # Store preference as given (int / "auto" / name); resolve at open time.
+            if isinstance(cam_pref, int) or (isinstance(cam_pref, str) and cam_pref.isdigit()):
+                cfg["camera_index"] = int(cam_pref)
+            else:
+                cfg["camera_index"] = cam_pref
             save_config(cfg)
         run_tray()
 

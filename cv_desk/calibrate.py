@@ -84,7 +84,7 @@ def run_calibrate(camera_pref: int | str | None = None) -> int:
             if cam.error:
                 status = cam.error
                 time.sleep(0.2)
-            frame, lms = cam.get()
+            _fid, frame, lms = cam.get()
             if frame is None:
                 time.sleep(0.01)
                 key = cv2.waitKey(1) & 0xFF

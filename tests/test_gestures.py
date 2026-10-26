@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 from cv_desk.vision.gestures import (
     GestureEngine,
-    fingers_opening,
     is_fist,
     is_ok,
     is_open_palm,

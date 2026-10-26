@@ -43,9 +43,25 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <true/>
   <key>NSCameraUsageDescription</key>
   <string>CV Desk uses the camera for hand-gesture desk controls.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>CV Desk uses AppleScript to control media playback, Mission Control, Spaces, and volume when Accessibility media keys are unavailable.</string>
 </dict>
 </plist>
 PLIST
+
+# Validate generated Info.plist (fail the build if keys/structure are wrong).
+plutil -lint "$APP/Contents/Info.plist"
+# Ensure required privacy strings are present.
+python3 - "$APP/Contents/Info.plist" <<'PY'
+import plistlib, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+data = plistlib.loads(p.read_bytes())
+for key in ("NSCameraUsageDescription", "NSAppleEventsUsageDescription"):
+    if key not in data or not str(data[key]).strip():
+        raise SystemExit(f"Info.plist missing {key}")
+print("Info.plist privacy keys OK")
+PY
 
 cat > "$MACOS/CVDesk" <<'EOF'
 #!/bin/bash

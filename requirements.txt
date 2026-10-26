@@ -1,4 +1,5 @@
-opencv-python>=4.8,<5
+# OpenCV comes from mediapipe (opencv-contrib-python). Do not also install
+# opencv-python — both packages write into the same cv2/ path and conflict.
 mediapipe==0.10.35
 numpy>=1.24,<3
 rumps>=0.4.0
