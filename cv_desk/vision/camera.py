@@ -40,6 +40,9 @@ _PREFER_NAME = re.compile(
 )
 
 _NO_FRAME_ERROR_SEC = 3.0
+_MODEL_BACKOFF_MAX = 300.0  # 5 min — model download only
+_CAM_BACKOFF_MAX = 5.0  # camera open / between sessions
+_download_announced = False
 
 
 def _sha256_file(path: Path) -> str:
@@ -66,6 +69,8 @@ def ensure_model() -> Path:
     On hash mismatch, download to a temp file first; only replace the cache
     after a successful verified download — never delete the existing file first.
     """
+    global _download_announced
+
     override = (os.environ.get("CVDESK_HAND_MODEL") or "").strip()
     if override:
         path = Path(override).expanduser()
@@ -75,6 +80,8 @@ def ensure_model() -> Path:
         return path
 
     if _model_ok(MODEL_PATH):
+        # Allow a future download outage to announce once again.
+        _download_announced = False
         return MODEL_PATH
 
     if MODEL_PATH.exists():
@@ -85,7 +92,9 @@ def ensure_model() -> Path:
 
     MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = MODEL_PATH.with_suffix(".task.part")
-    print(f"Downloading hand model → {MODEL_PATH}")
+    if not _download_announced:
+        print(f"Downloading hand model → {MODEL_PATH}")
+        _download_announced = True
     try:
         if tmp.exists():
             try:
@@ -99,11 +108,11 @@ def ensure_model() -> Path:
         except OSError:
             pass
         # Keep any existing on-disk model (even if hash-mismatched / manual).
-        raise RuntimeError(
-            f"failed to download hand model (need network): {e}\n"
-            f"  existing file left untouched at {MODEL_PATH}\n"
-            f"  or set CVDESK_HAND_MODEL=/path/to/hand_landmarker.task"
-        ) from e
+        msg = f"failed to download hand model (need network): {e}\n"
+        if MODEL_PATH.exists():
+            msg += f"  existing file left untouched at {MODEL_PATH}\n"
+        msg += "  or set CVDESK_HAND_MODEL=/path/to/hand_landmarker.task"
+        raise RuntimeError(msg) from e
     if not _model_ok(tmp):
         try:
             tmp.unlink()
@@ -114,7 +123,8 @@ def ensure_model() -> Path:
         )
     # Preserve a manually placed / mismatched cache before overwrite.
     if MODEL_PATH.exists():
-        bak = Path(str(MODEL_PATH) + ".bak")
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        bak = Path(str(MODEL_PATH) + f".{stamp}.bak")
         try:
             shutil.copy2(MODEL_PATH, bak)
             log.warning(
@@ -124,6 +134,7 @@ def ensure_model() -> Path:
         except OSError as e:
             log.warning("could not backup previous model (%s); replacing anyway", e)
     os.replace(tmp, MODEL_PATH)
+    _download_announced = False
     return MODEL_PATH
 
 
@@ -299,9 +310,14 @@ class HandCameraThread(threading.Thread):
         """Hook for tests — production calls MediaPipe detect_for_video."""
         return landmarker.detect_for_video(mp_image, ts)
 
+    def _wait_or_stop(self, seconds: float) -> bool:
+        """Interruptible sleep. Return True if stop was requested."""
+        return self._stop_evt.wait(timeout=max(0.0, float(seconds)))
+
     def run(self):
         """Capture loop: never exit until stop(); reopen/recreate on errors with backoff."""
-        backoff = 0.5
+        model_backoff = 0.5
+        cam_backoff = 0.5
         last_setup_err: str | None = None
         while not self._stop_evt.is_set():
             landmarker = None
@@ -318,8 +334,9 @@ class HandCameraThread(threading.Thread):
                             e,
                         )
                         last_setup_err = err_key
-                    time.sleep(backoff)
-                    backoff = min(backoff * 2.0, 300.0)
+                    if self._wait_or_stop(model_backoff):
+                        break
+                    model_backoff = min(model_backoff * 2.0, _MODEL_BACKOFF_MAX)
                     continue
 
                 cap = self._open_capture()
@@ -327,15 +344,19 @@ class HandCameraThread(threading.Thread):
                     self.error = f"camera {self.camera_index} ({self.camera_name}) failed"
                     if self.error != last_setup_err:
                         log.error(
-                            "%s — retrying (backoff up to 5 min)",
+                            "%s — retrying (backoff up to %.0fs)",
                             self.error,
+                            _CAM_BACKOFF_MAX,
                         )
                         last_setup_err = self.error
-                    time.sleep(backoff)
-                    backoff = min(backoff * 2.0, 300.0)
+                    if self._wait_or_stop(cam_backoff):
+                        break
+                    cam_backoff = min(cam_backoff * 2.0, _CAM_BACKOFF_MAX)
                     continue
 
                 last_setup_err = None
+                model_backoff = 0.5
+                cam_backoff = 0.5
                 ts = 0
                 last_ok = time.monotonic()
                 session_backoff = 0.5
@@ -355,18 +376,21 @@ class HandCameraThread(threading.Thread):
                                     cap.release()
                                 except cv2.error:
                                     pass
-                                time.sleep(session_backoff)
-                                session_backoff = min(session_backoff * 2.0, 8.0)
+                                if self._wait_or_stop(session_backoff):
+                                    break
+                                session_backoff = min(session_backoff * 2.0, _CAM_BACKOFF_MAX)
                                 cap = self._open_capture()
                                 if not cap.isOpened():
                                     continue
                             else:
-                                time.sleep(0.05)
+                                if self._wait_or_stop(0.05):
+                                    break
                             continue
 
                         last_ok = time.monotonic()
                         session_backoff = 0.5
-                        backoff = 0.5
+                        cam_backoff = 0.5
+                        model_backoff = 0.5
                         if self.error:
                             log.info("camera recovered: %s", self.camera_name)
                             self.error = None
@@ -406,5 +430,6 @@ class HandCameraThread(threading.Thread):
 
             if self._stop_evt.is_set():
                 break
-            time.sleep(backoff)
-            backoff = min(backoff * 2.0, 300.0)
+            if self._wait_or_stop(cam_backoff):
+                break
+            cam_backoff = min(cam_backoff * 2.0, _CAM_BACKOFF_MAX)

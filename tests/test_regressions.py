@@ -747,6 +747,25 @@ class ModelHashPreservesManual(unittest.TestCase):
             self.assertEqual(model.read_bytes(), payload)
             self.assertIn("untouched", str(ctx.exception).lower())
 
+    def test_offline_missing_file_no_untouched_msg(self):
+        with tempfile.TemporaryDirectory() as td:
+            model = Path(td) / "hand_landmarker.task"
+
+            def boom(*_a, **_k):
+                raise OSError("network down")
+
+            with mock.patch.object(camera_mod, "MODEL_PATH", model):
+                with mock.patch.object(camera_mod, "MODEL_SHA256", "deadbeef" * 8):
+                    with mock.patch.object(camera_mod, "_download_announced", False):
+                        with mock.patch.dict(os.environ, {}, clear=False):
+                            os.environ.pop("CVDESK_HAND_MODEL", None)
+                            with mock.patch.object(
+                                camera_mod.urllib.request, "urlretrieve", side_effect=boom
+                            ):
+                                with self.assertRaises(RuntimeError) as ctx:
+                                    camera_mod.ensure_model()
+            self.assertNotIn("untouched", str(ctx.exception).lower())
+
     def test_env_override_skips_hash(self):
         with tempfile.TemporaryDirectory() as td:
             custom = Path(td) / "custom.task"
@@ -915,16 +934,156 @@ class ModelBackupOnReplace(unittest.TestCase):
 
             with mock.patch.object(camera_mod, "MODEL_PATH", model):
                 with mock.patch.object(camera_mod, "MODEL_SHA256", good_hash):
-                    with mock.patch.dict(os.environ, {}, clear=False):
-                        os.environ.pop("CVDESK_HAND_MODEL", None)
-                        with mock.patch.object(
-                            camera_mod.urllib.request, "urlretrieve", side_effect=fake_retrieve
-                        ):
-                            camera_mod.ensure_model()
-            bak = Path(str(model) + ".bak")
-            self.assertTrue(bak.is_file())
-            self.assertEqual(bak.read_bytes(), old)
+                    with mock.patch.object(camera_mod, "_download_announced", False):
+                        with mock.patch.dict(os.environ, {}, clear=False):
+                            os.environ.pop("CVDESK_HAND_MODEL", None)
+                            with mock.patch.object(
+                                camera_mod.urllib.request, "urlretrieve", side_effect=fake_retrieve
+                            ):
+                                camera_mod.ensure_model()
+            baks = list(Path(td).glob("hand_landmarker.task.*.bak"))
+            self.assertEqual(len(baks), 1)
+            self.assertRegex(baks[0].name, r"hand_landmarker\.task\.\d{8}-\d{6}\.bak")
+            self.assertEqual(baks[0].read_bytes(), old)
             self.assertEqual(model.read_bytes(), payload)
+
+
+def _never_open_cam(name: str = "never") -> camera_mod.HandCameraThread:
+    cam = camera_mod.HandCameraThread(0, name)
+
+    class FakeLM:
+        def close(self):
+            pass
+
+    class NeverOpen:
+        def isOpened(self):
+            return False
+
+        def release(self):
+            pass
+
+        def set(self, *_a):
+            return True
+
+    cam._create_landmarker = lambda: FakeLM()  # type: ignore[method-assign]
+    cam._open_capture = lambda: NeverOpen()  # type: ignore[method-assign]
+    return cam
+
+
+def _working_fakes(cam: camera_mod.HandCameraThread) -> None:
+    class FakeCap:
+        def isOpened(self):
+            return True
+
+        def read(self):
+            return True, np.zeros((24, 32, 3), dtype=np.uint8)
+
+        def set(self, *_a):
+            return True
+
+        def release(self):
+            pass
+
+    class FakeLM:
+        def detect_for_video(self, *_a, **_k):
+            return SimpleNamespace(hand_landmarks=[])
+
+        def close(self):
+            pass
+
+    cam._create_landmarker = lambda: FakeLM()  # type: ignore[method-assign]
+    cam._open_capture = lambda: FakeCap()  # type: ignore[method-assign]
+
+
+class CameraBackoffInterrupt(unittest.TestCase):
+    """stop() must interrupt cam open backoff so join/restart/quit are responsive."""
+
+    def test_stop_after_retries_joins_fast(self):
+        cam = _never_open_cam("retry")
+        cam.start()
+        time.sleep(20.0)
+        t0 = time.monotonic()
+        cam.stop()
+        cam.join(timeout=1.0)
+        self.assertFalse(cam.is_alive())
+        self.assertLess(time.monotonic() - t0, 1.0)
+
+    def test_restart_camera_replaces_stuck_open(self):
+        from cv_desk import app as app_mod
+
+        with mock.patch.object(
+            app_mod,
+            "load_config",
+            return_value={
+                "camera_index": 0,
+                "cooldown_sec": 0.4,
+                "swipe_vx": 0.38,
+                "pinch_vol_sensitivity": 2.4,
+                "volume_step": 2,
+                "armed": True,
+                "preview": False,
+                "actions": {},
+                "profiles": {},
+            },
+        ):
+            with mock.patch.object(app_mod, "save_config"):
+                with mock.patch.object(
+                    app_mod, "resolve_camera_index", return_value=(0, "Cam0")
+                ):
+                    core = app_mod.CVDeskApp(camera_pref=0)
+                    old = _never_open_cam("old")
+                    core.cam = old
+                    old.start()
+                    time.sleep(0.3)
+
+                    created: list[camera_mod.HandCameraThread] = []
+
+                    def fake_thread(idx, name=""):
+                        t = camera_mod.HandCameraThread(idx, name or "new")
+                        _working_fakes(t)
+                        created.append(t)
+                        return t
+
+                    with mock.patch.object(app_mod, "HandCameraThread", side_effect=fake_thread):
+                        core.restart_camera(0)
+                    self.assertFalse(old.is_alive())
+                    self.assertTrue(created)
+                    self.assertIs(core.cam, created[-1])
+                    self.assertTrue(core.cam.is_alive())
+                    core.quit()
+                    self.assertFalse(core.cam.is_alive())
+
+    def test_quit_joins_faster_than_one_sec(self):
+        from cv_desk import app as app_mod
+
+        with mock.patch.object(
+            app_mod,
+            "load_config",
+            return_value={
+                "camera_index": 0,
+                "cooldown_sec": 0.4,
+                "swipe_vx": 0.38,
+                "pinch_vol_sensitivity": 2.4,
+                "volume_step": 2,
+                "armed": True,
+                "preview": False,
+                "actions": {},
+                "profiles": {},
+            },
+        ):
+            with mock.patch.object(app_mod, "save_config"):
+                with mock.patch.object(
+                    app_mod, "resolve_camera_index", return_value=(0, "Cam0")
+                ):
+                    core = app_mod.CVDeskApp(camera_pref=0)
+                    cam = _never_open_cam("quit")
+                    core.cam = cam
+                    cam.start()
+                    time.sleep(0.2)
+                    t0 = time.monotonic()
+                    core.quit()
+                    self.assertFalse(cam.is_alive())
+                    self.assertLess(time.monotonic() - t0, 1.0)
 
 
 if __name__ == "__main__":
