@@ -818,6 +818,8 @@ class CameraDetectRecovery(unittest.TestCase):
         cam._create_landmarker = fake_create  # type: ignore[method-assign]
         cam._open_capture = lambda: FakeCap()  # type: ignore[method-assign]
         cam._detect_for_video = lambda lm, img, ts: lm.detect_for_video(img, ts)  # type: ignore
+        # Avoid real MediaPipe Image (needs libGLESv2 — missing on Linux CI).
+        cam._make_mp_image = lambda rgb: rgb  # type: ignore[method-assign]
 
         cam.start()
         deadline = time.monotonic() + 3.0
@@ -867,6 +869,7 @@ class HandCameraThreadJoin(unittest.TestCase):
 
         cam._create_landmarker = lambda: FakeLM()  # type: ignore[method-assign]
         cam._open_capture = lambda: FakeCap()  # type: ignore[method-assign]
+        cam._make_mp_image = lambda rgb: rgb  # type: ignore[method-assign]
         # Ensure we did not shadow Thread._stop with an Event.
         self.assertIsInstance(cam._stop_evt, threading.Event)
         self.assertFalse(isinstance(getattr(cam, "_stop", None), threading.Event))
@@ -993,6 +996,8 @@ def _working_fakes(cam: camera_mod.HandCameraThread) -> None:
 
     cam._create_landmarker = lambda: FakeLM()  # type: ignore[method-assign]
     cam._open_capture = lambda: FakeCap()  # type: ignore[method-assign]
+    # Headless Linux CI has no libGLESv2 — skip native MediaPipe Image.
+    cam._make_mp_image = lambda rgb: rgb  # type: ignore[method-assign]
 
 
 class CameraBackoffInterrupt(unittest.TestCase):

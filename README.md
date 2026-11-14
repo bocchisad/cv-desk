@@ -7,6 +7,7 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Version](https://img.shields.io/badge/version-1.0.2-blue)
 ![Release](https://img.shields.io/github/v/release/bocchisad/cv-desk)
+[![XERJ Corpus Hub contributor](https://hub.xerj.org/contributors/bocchisad/badge.svg)](https://hub.xerj.org/contributors/bocchisad)
 
 ---
 

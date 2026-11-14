@@ -306,6 +306,10 @@ class HandCameraThread(threading.Thread):
         )
         return vision.HandLandmarker.create_from_options(opts)
 
+    def _make_mp_image(self, rgb: np.ndarray):
+        """Hook for tests — production builds a MediaPipe Image (needs GLES on Linux)."""
+        return mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
     def _detect_for_video(self, landmarker, mp_image, ts: int):
         """Hook for tests — production calls MediaPipe detect_for_video."""
         return landmarker.detect_for_video(mp_image, ts)
@@ -397,7 +401,7 @@ class HandCameraThread(threading.Thread):
 
                         frame = cv2.flip(frame, 1)
                         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                        mp_image = self._make_mp_image(rgb)
                         now_ms = int(time.monotonic() * 1000)
                         if now_ms <= ts:
                             now_ms = ts + 1
